@@ -1,0 +1,20 @@
+{
+  "name": "zfl-2-costume-lending",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 0.0.0.0 --port 5172",
+    "build": "vite build",
+    "preview": "vite preview --host 0.0.0.0 --port 5172"
+  },
+  "dependencies": {
+    "@sveltejs/adapter-auto": "^4.0.0",
+    "@sveltejs/kit": "^2.22.0",
+    "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "svelte": "^5.0.0",
+    "vite": "^6.3.5",
+    "lucide-svelte": "^0.468.0"
+  },
+  "devDependencies": {}
+}
