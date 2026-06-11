@@ -229,6 +229,9 @@
       const note = `盘点差异处理：${item.actualStatus}`;
       createWorkOrder(type, costume, '', note);
       processingWorkOrders[itemId] = false;
+      refreshData();
+      const event = new CustomEvent('inventory-updated');
+      document.dispatchEvent(event);
       alert(`已生成${type}工单`);
     }, 100);
   }
@@ -315,7 +318,11 @@
             <h2>{task.name}</h2>
             <div class="detail-meta">
               <span class="task-status {task.status === TASK_STATUS.COMPLETED ? 'status-done' : 'status-progress'}">
-                {task.status === TASK_STATUS.COMPLETED ? '<CheckCircle size={12} />' : '<Clock size={12} />'}
+                {#if task.status === TASK_STATUS.COMPLETED}
+                  <CheckCircle size={12} />
+                {:else}
+                  <Clock size={12} />
+                {/if}
                 {task.status}
               </span>
               <span>创建于 {formatTime(task.createdAt)}</span>
@@ -579,11 +586,15 @@
                       </div>
                     {:else if item.actualStatus === INVENTORY_STATUS.STATUS_MISMATCH}
                       <div class="detail-row mismatch">
-                        <span class="detail-label">档案状态：</span>
-                        <span class="old-value">{item.expectedStatus} / {item.expectedClean}</span>
+                        <span class="detail-label">档案借出状态：</span>
+                        <span class="old-value">{item.expectedStatus}</span>
                       </div>
                       <div class="detail-row mismatch">
-                        <span class="detail-label">实际状态：</span>
+                        <span class="detail-label">档案清洗状态：</span>
+                        <span class="old-value">{item.expectedClean}</span>
+                      </div>
+                      <div class="detail-row mismatch">
+                        <span class="detail-label">实际清洗状态：</span>
                         <span class="new-value">{item.actualClean || item.expectedClean}</span>
                       </div>
                     {/if}
@@ -608,7 +619,7 @@
                         </button>
                       {/if}
 
-                      {#if item.actualStatus === INVENTORY_STATUS.STATUS_MISMATCH && item.expectedClean === '待清洗'}
+                      {#if item.actualStatus === INVENTORY_STATUS.STATUS_MISMATCH && (item.actualClean || item.expectedClean) === '待清洗'}
                         <button
                           type="button"
                           class="action-btn action-clean"

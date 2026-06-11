@@ -141,7 +141,11 @@
         <div class="task-header">
           <strong class="task-name">{task.name}</strong>
           <span class="task-status-badge {task.status === TASK_STATUS.COMPLETED ? 'status-done' : 'status-progress'}">
-            {task.status === TASK_STATUS.COMPLETED ? '<CheckCircle size={12} />' : '<Play size={12} />'}
+            {#if task.status === TASK_STATUS.COMPLETED}
+              <CheckCircle size={12} />
+            {:else}
+              <Play size={12} />
+            {/if}
             {task.status}
           </span>
         </div>
