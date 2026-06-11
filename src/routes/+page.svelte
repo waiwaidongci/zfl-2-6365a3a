@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal, Package, Printer, Box, AlertOctagon, Database, RefreshCw, HardDrive, LayoutGrid } from 'lucide-svelte';
+  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal, Package, Printer, Box, AlertOctagon, Database, RefreshCw, HardDrive, LayoutGrid, ClipboardList } from 'lucide-svelte';
   import {
     initializeDatabase,
     getAll,
@@ -19,6 +19,8 @@
   } from '$lib/database.js';
   import ScheduleKanban from '$lib/ScheduleKanban.svelte';
   import { getAllSchedules } from '$lib/scheduleStore.js';
+  import InventoryPanel from '$lib/InventoryPanel.svelte';
+  import InventoryDetail from '$lib/InventoryDetail.svelte';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -131,6 +133,11 @@
   let showDeleteActorConfirm = false;
   let lendingActorId = '';
 
+  let inventoryTasks = [];
+  let showInventoryDetail = false;
+  let selectedInventoryTaskId = null;
+  let inventoryPanelRef = null;
+
   let dbStats = null;
   let showDataManager = false;
   let showScheduleKanban = false;
@@ -149,11 +156,44 @@
     actors = db.tables[TABLES.actors] || [];
     packingLists = db.tables[TABLES.packingLists] || [];
     schedules = db.tables[TABLES.schedules] || [];
+    inventoryTasks = db.tables[TABLES.inventoryTasks] || [];
     dbStats = getDBStats();
     if (hadLegacy && db.migratedAt) {
       dbMigrationNotice = '检测到旧版数据已自动迁移到新版数据层，可在数据管理中查看详情。';
     }
+
+    document.addEventListener('select-task', handleSelectInventoryTask);
+    document.addEventListener('inventory-updated', handleInventoryUpdated);
   });
+
+  function handleSelectInventoryTask(e) {
+    selectedInventoryTaskId = e.detail;
+    showInventoryDetail = true;
+  }
+
+  function handleInventoryUpdated() {
+    const db = initializeDatabase();
+    costumes = db.tables[TABLES.costumes] || [];
+    records = db.tables[TABLES.records] || [];
+    reservations = db.tables[TABLES.reservations] || [];
+    workOrders = db.tables[TABLES.workOrders] || [];
+    actors = db.tables[TABLES.actors] || [];
+    packingLists = db.tables[TABLES.packingLists] || [];
+    schedules = db.tables[TABLES.schedules] || [];
+    inventoryTasks = db.tables[TABLES.inventoryTasks] || [];
+    refreshDBStats();
+  }
+
+  function closeInventoryDetail() {
+    showInventoryDetail = false;
+    selectedInventoryTaskId = null;
+    const db = initializeDatabase();
+    costumes = db.tables[TABLES.costumes] || [];
+    records = db.tables[TABLES.records] || [];
+    workOrders = db.tables[TABLES.workOrders] || [];
+    inventoryTasks = db.tables[TABLES.inventoryTasks] || [];
+    refreshDBStats();
+  }
 
   let localStorageAvailable = typeof localStorage !== 'undefined';
 
@@ -277,6 +317,7 @@
     actors = db.tables[TABLES.actors] || [];
     packingLists = db.tables[TABLES.packingLists] || [];
     schedules = db.tables[TABLES.schedules] || [];
+    inventoryTasks = db.tables[TABLES.inventoryTasks] || [];
     refreshDBStats();
     closeDataManager();
   }
@@ -1229,6 +1270,8 @@
         closePackingListModal();
       } else if (showPackingListDetail) {
         closePackingListDetail();
+      } else if (showInventoryDetail) {
+        closeInventoryDetail();
       } else if (selectedId) {
         closeDetail();
       }
@@ -1248,6 +1291,7 @@
       <b><CalendarDays size={18} />{activeReservationCount}个预约</b>
       <b><Archive size={18} />{cleanWaitCount}件待清洗</b>
       <b><Package size={18} />{packingLists.length}个装箱单</b>
+      <b><ClipboardList size={18} />{inventoryTasks.length}次盘点</b>
       <b><LayoutGrid size={18} />{scheduleCount}条排期</b>
       <b class:danger={overdueCount > 0}><AlertTriangle size={18} />{overdueCount}项逾期</b>
       <button type="button" class="hero-data-btn" on:click={openDataManager}>
@@ -1520,7 +1564,7 @@
         <Database size={16} />高级管理
       </button>
     </div>
-    <p class="hint">「完整备份」包含服装、借还记录、预约、工单、演员、装箱单等所有数据；「仅导服装」只导出服装档案，兼容旧版导入格式。</p>
+    <p class="hint">「完整备份」包含服装、借还记录、预约、工单、演员、装箱单、盘点等所有数据；「仅导服装」只导出服装档案，兼容旧版导入格式。</p>
   </section>
 
   <section class="panel">
@@ -1804,6 +1848,20 @@
       {/if}
     </div>
   </section>
+
+  <section class="panel inventory-section">
+    <InventoryPanel
+      bind:this={inventoryPanelRef}
+      {costumes}
+    />
+  </section>
+
+  {#if showInventoryDetail && selectedInventoryTaskId}
+    <InventoryDetail
+      taskId={selectedInventoryTaskId}
+      onClose={closeInventoryDetail}
+    />
+  {/if}
 
   {#if selected}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -2719,6 +2777,14 @@
                   <div class="db-stat-num">{dbStats.tables.schedules || 0}</div>
                   <div class="db-stat-label">演出排期</div>
                 </div>
+                <div class="db-stat-card">
+                  <div class="db-stat-num">{dbStats.tables.inventoryTasks || 0}</div>
+                  <div class="db-stat-label">盘点任务</div>
+                </div>
+                <div class="db-stat-card">
+                  <div class="db-stat-num">{dbStats.tables.inventoryItems || 0}</div>
+                  <div class="db-stat-label">盘点明细</div>
+                </div>
               </div>
             </div>
           {/if}
@@ -2791,6 +2857,14 @@
                     <div class="db-stat-card">
                       <div class="db-stat-num">{restorePreview.tables.packingLists || 0}</div>
                       <div class="db-stat-label">装箱单</div>
+                    </div>
+                    <div class="db-stat-card">
+                      <div class="db-stat-num">{restorePreview.tables.inventoryTasks || 0}</div>
+                      <div class="db-stat-label">盘点任务</div>
+                    </div>
+                    <div class="db-stat-card">
+                      <div class="db-stat-num">{restorePreview.tables.inventoryItems || 0}</div>
+                      <div class="db-stat-label">盘点明细</div>
                     </div>
                   </div>
                 {/if}

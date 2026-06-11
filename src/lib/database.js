@@ -1,5 +1,5 @@
 const DB_KEY = 'zfl-2-database';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 const TABLES = {
   costumes: 'costumes',
@@ -8,7 +8,9 @@ const TABLES = {
   workOrders: 'workOrders',
   actors: 'actors',
   packingLists: 'packingLists',
-  schedules: 'schedules'
+  schedules: 'schedules',
+  inventoryTasks: 'inventoryTasks',
+  inventoryItems: 'inventoryItems'
 };
 
 const LEGACY_KEYS = {
@@ -31,7 +33,9 @@ function createEmptyDatabase() {
       [TABLES.workOrders]: [],
       [TABLES.actors]: [],
       [TABLES.packingLists]: [],
-      [TABLES.schedules]: []
+      [TABLES.schedules]: [],
+      [TABLES.inventoryTasks]: [],
+      [TABLES.inventoryItems]: []
     }
   };
 }
@@ -114,9 +118,20 @@ function migrate_v2_to_v3(db) {
   return db;
 }
 
+function migrate_v3_to_v4(db) {
+  if (!db.tables[TABLES.inventoryTasks]) {
+    db.tables[TABLES.inventoryTasks] = [];
+  }
+  if (!db.tables[TABLES.inventoryItems]) {
+    db.tables[TABLES.inventoryItems] = [];
+  }
+  return db;
+}
+
 const MIGRATIONS = {
   1: migrate_v1_to_v2,
-  2: migrate_v2_to_v3
+  2: migrate_v2_to_v3,
+  3: migrate_v3_to_v4
 };
 
 function runMigrations(db) {
