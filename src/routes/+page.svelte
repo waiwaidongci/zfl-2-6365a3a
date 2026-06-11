@@ -182,6 +182,7 @@
     schedules = db.tables[TABLES.schedules] || [];
     inventoryTasks = db.tables[TABLES.inventoryTasks] || [];
     refreshDBStats();
+    inventoryPanelRef?.refresh?.();
   }
 
   function closeInventoryDetail() {

@@ -115,6 +115,15 @@
     selectedItemId = null;
   }
 
+  function getQuickActualClean(item, status) {
+    if (status === INVENTORY_STATUS.NORMAL) return item.expectedClean;
+    if (status === INVENTORY_STATUS.STATUS_MISMATCH) {
+      if (item.actualClean && item.actualClean !== item.expectedClean) return item.actualClean;
+      return item.expectedClean === '待清洗' ? '维修中' : '待清洗';
+    }
+    return item.actualClean || item.expectedClean;
+  }
+
   function saveItemStatus() {
     if (!selectedItemId) return;
     updateInventoryItemStatus(
@@ -137,7 +146,7 @@
       itemId,
       status,
       status === INVENTORY_STATUS.NORMAL ? item.expectedLocation : item.actualLocation || item.expectedLocation,
-      status === INVENTORY_STATUS.NORMAL ? item.expectedClean : item.actualClean || item.expectedClean,
+      getQuickActualClean(item, status),
       item.note || ''
     );
     refreshData();
