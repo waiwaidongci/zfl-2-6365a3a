@@ -12,7 +12,8 @@
     computeDailyRisk,
     autoLinkCostumes,
     getUpcomingSchedules,
-    getUniquePlays
+    getUniquePlays,
+    generatePackingListFromSchedule
   } from '$lib/scheduleStore.js';
 
   export let schedules = [];
@@ -226,6 +227,11 @@
     ? computeDailyRisk(selectedSchedule.date, costumes, reservations, workOrders, packingLists).find((r) => r.schedule.id === selectedSchedule.id)
     : null;
 
+  function handleGeneratePackingList(schedule) {
+    const draft = generatePackingListFromSchedule(schedule, costumes, reservations, workOrders);
+    dispatch('generate-packing-list', draft);
+  }
+
   function handleKeydown(e) {
     if (e.key === 'Escape') {
       if (showRiskDetail) closeRiskSummary();
@@ -356,6 +362,9 @@
                   {/if}
 
                   <div class="sk-card-footer">
+                    <button type="button" class="sk-sm-btn sk-sm-btn-primary" on:click={() => handleGeneratePackingList(schedule)}>
+                      <Package size={12} />生成装箱单
+                    </button>
                     <button type="button" class="sk-sm-btn" on:click={() => openEditModal(schedule.id)}>
                       <Save size={12} />编辑
                     </button>
@@ -542,6 +551,9 @@
         {/if}
 
         <div class="sk-modal-actions">
+          <button type="button" class="sk-btn-primary" on:click={() => { handleGeneratePackingList(selectedSchedule); closeDetail(); }}>
+            <Package size={16} />生成装箱单
+          </button>
           <button type="button" class="sk-btn-secondary" on:click={() => { closeDetail(); openEditModal(selectedSchedule.id); }}>
             <Save size={16} />编辑
           </button>
@@ -649,6 +661,21 @@
     font: inherit;
     font-size: 13px;
   }
+  .sk-btn-primary {
+    border: 0;
+    border-radius: 8px;
+    padding: 8px 13px;
+    background: #603d2d;
+    color: #fff;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    font: inherit;
+    font-size: 13px;
+  }
+  .sk-btn-primary:hover { background: #4e3225; }
   .sk-toolbar {
     display: grid;
     grid-template-columns: 1fr 160px;
@@ -937,6 +964,8 @@
     font: inherit;
   }
   .sk-sm-btn:hover { background: #f0e6dc; }
+  .sk-sm-btn-primary { background: #603d2d; color: #fff; border-color: #603d2d; }
+  .sk-sm-btn-primary:hover { background: #4e3225; }
   .sk-sm-btn-danger { border-color: #d9b5ad; color: #b84a3b; }
   .sk-sm-btn-danger:hover { background: #fdf0ec; }
 

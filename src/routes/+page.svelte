@@ -509,6 +509,7 @@
 
   function addCostumeToPackingList(costume) {
     if (packingListForm.items.find((item) => item.costumeId === costume.id)) return;
+    const alerts = getCostumeAlert(costume.id);
     packingListForm.items = [
       ...packingListForm.items,
       {
@@ -517,7 +518,9 @@
         size: costume.size,
         location: costume.location,
         status: '未标记',
-        note: ''
+        note: '',
+        source: '手动添加',
+        risks: alerts || []
       }
     ];
   }
@@ -551,6 +554,15 @@
   function savePackingList() {
     if (!packingListForm.play.trim() || !packingListForm.performanceDate) return;
 
+    const cleanItems = packingListForm.items.map((item) => ({
+      costumeId: item.costumeId,
+      costumeName: item.costumeName,
+      size: item.size,
+      location: item.location,
+      status: item.status,
+      note: item.note
+    }));
+
     if (creatingPackingList) {
       const newList = {
         id: crypto.randomUUID(),
@@ -559,11 +571,21 @@
         name: packingListForm.name.trim() || `${packingListForm.play} - ${packingListForm.performanceDate}`,
         note: packingListForm.note.trim(),
         createdAt: new Date().toISOString(),
-        items: packingListForm.items
+        items: cleanItems,
+        sourceScheduleId: packingListForm.sourceScheduleId || null,
+        generatedAt: packingListForm.generatedAt || null
       };
       packingLists = [newList, ...packingLists];
       persistPackingLists();
-      addRecord('装箱单创建', { name: newList.name, play: newList.play }, '系统', `创建装箱单「${newList.name}」，剧目：${newList.play}，演出日期：${newList.performanceDate}，共${newList.items.length}件服装`);
+      const riskCount = cleanItems.filter(i => i.status === '缺失' || i.status === '需清洗').length;
+      let summary = `创建装箱单「${newList.name}」，剧目：${newList.play}，演出日期：${newList.performanceDate}，共${newList.items.length}件服装`;
+      if (packingListForm.sourceScheduleId) {
+        summary += '（由排期一键生成）';
+      }
+      if (riskCount > 0) {
+        summary += `，其中${riskCount}件存在风险（缺失/需清洗）`;
+      }
+      addRecord('装箱单创建', { name: newList.name, play: newList.play }, '系统', summary);
     } else if (editingPackingListId) {
       packingLists = packingLists.map((pl) => pl.id === editingPackingListId ? {
         ...pl,
@@ -571,7 +593,7 @@
         performanceDate: packingListForm.performanceDate,
         name: packingListForm.name.trim() || `${packingListForm.play} - ${packingListForm.performanceDate}`,
         note: packingListForm.note.trim(),
-        items: packingListForm.items
+        items: cleanItems
       } : pl);
       persistPackingLists();
     }
@@ -589,6 +611,46 @@
       showPackingListDetail = false;
     }
     addRecord('装箱单删除', { name: list.name, play: list.play }, '系统', `删除装箱单「${list.name}」`);
+  }
+
+  function handleGeneratePackingListFromSchedule(e) {
+    const draft = e.detail;
+    if (!draft) return;
+
+    const existing = packingLists.find(
+      (pl) => pl.play === draft.play && pl.performanceDate === draft.performanceDate
+    );
+    if (existing) {
+      if (!confirm(`检测到已存在同剧目同日期的装箱单「${existing.name}」。\n\n是否基于排期数据创建一个新的装箱单？\n\n点击「确定」创建新装箱单，点击「取消」打开已有装箱单进行编辑。`)) {
+        openEditPackingList(existing.id);
+        return;
+      }
+    }
+
+    creatingPackingList = true;
+    editingPackingListId = null;
+    packingListForm = {
+      play: draft.play,
+      performanceDate: draft.performanceDate,
+      name: draft.name,
+      note: draft.note,
+      items: draft.items.map((item) => ({
+        costumeId: item.costumeId,
+        costumeName: item.costumeName,
+        size: item.size,
+        location: item.location,
+        status: item.status,
+        note: item.note,
+        source: item.source,
+        risks: item.risks
+      })),
+      sourceScheduleId: draft.sourceScheduleId,
+      generatedAt: draft.generatedAt
+    };
+    packingAddCostumeQuery = '';
+    packingAddCostumePlayFilter = draft.play || '全部剧目';
+    showPackingListModal = true;
+    showScheduleKanban = false;
   }
 
   function openPackingListDetail(id) {
@@ -1455,6 +1517,7 @@
         {workOrders}
         {packingLists}
         on:change={handleScheduleChange}
+        on:generate-packing-list={handleGeneratePackingListFromSchedule}
       />
     </section>
   {/if}
@@ -2532,9 +2595,29 @@
             <input bind:value={packingListForm.note} placeholder="选填，如特殊要求等" />
           </label>
 
+          {#if packingListForm.sourceScheduleId}
+            <div class="packing-generated-notice">
+              <Package size={16} />
+              <span>由排期「{packingListForm.play} {packingListForm.performanceDate}」一键生成，含排期关联、同日预约、剧目预约、剧目服装。您仍可继续手动增删服装。</span>
+            </div>
+          {/if}
+
           <div class="packing-section">
             <div class="packing-section-title">
               <strong>已添加服装（{packingListForm.items.length}件）</strong>
+              {#if packingListForm.items.length > 0}
+                <span class="packing-items-summary">
+                  {#if packingListForm.items.filter(i => i.status === '缺失').length > 0}
+                    <span class="packing-summary-tag packing-summary-missing">缺失 {packingListForm.items.filter(i => i.status === '缺失').length}</span>
+                  {/if}
+                  {#if packingListForm.items.filter(i => i.status === '需清洗').length > 0}
+                    <span class="packing-summary-tag packing-summary-clean">需清洗 {packingListForm.items.filter(i => i.status === '需清洗').length}</span>
+                  {/if}
+                  {#if packingListForm.items.filter(i => i.status === '未标记').length > 0}
+                    <span class="packing-summary-tag">待确认 {packingListForm.items.filter(i => i.status === '未标记').length}</span>
+                  {/if}
+                </span>
+              {/if}
             </div>
             {#if packingListForm.items.length === 0}
               <div class="record-empty" style="padding: 20px;">
@@ -2545,12 +2628,21 @@
             {:else}
               <div class="packing-items-list">
                 {#each packingListForm.items as item}
-                  {@const alerts = getCostumeAlert(item.costumeId)}
-                  <div class="packing-item-row" class:packing-item-has-alert={alerts}>
+                  {@const alerts = item.risks && item.risks.length > 0 ? item.risks : getCostumeAlert(item.costumeId)}
+                  <div class="packing-item-row" class:packing-item-has-alert={alerts && alerts.length > 0}>
                     <div class="packing-item-info">
-                      <strong>{item.costumeName}</strong>
+                      <div class="packing-item-title-row">
+                        <strong>{item.costumeName}</strong>
+                        <span class="packing-item-status {getPackingStatusClass(item.status)}">{item.status}</span>
+                        {#if item.source}
+                          <span class="packing-item-source">{item.source}</span>
+                        {/if}
+                      </div>
                       <span>{item.size || '未填尺码'} · {item.location || '未填位置'}</span>
-                      {#if alerts}
+                      {#if item.note}
+                        <span class="packing-item-note">📝 {item.note}</span>
+                      {/if}
+                      {#if alerts && alerts.length > 0}
                         <div class="packing-item-alerts">
                           {#each alerts as alert}
                             <span class="packing-alert-tag packing-alert-{alert.type}">
@@ -3236,6 +3328,83 @@
   .packing-alert-borrowed { background: #fff0e6; color: #8a4a1a; }
   .packing-alert-overdue { background: #fdecea; color: #8a2d2d; }
   .packing-alert-workorder { background: #fff4e6; color: #8a5a1a; }
+
+  .packing-generated-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    background: #eef6ee;
+    border: 1px solid #b8d8b8;
+    border-radius: 8px;
+    font-size: 13px;
+    color: #2d5a2d;
+    line-height: 1.5;
+  }
+
+  .packing-items-summary {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .packing-summary-tag {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #f6efe7;
+    color: #6b5a4d;
+  }
+
+  .packing-summary-tag.packing-summary-missing {
+    background: #fdecea;
+    color: #8a2d2d;
+  }
+
+  .packing-summary-tag.packing-summary-clean {
+    background: #e6eef6;
+    color: #1a4a8a;
+  }
+
+  .packing-item-title-row {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 2px;
+  }
+
+  .packing-item-status {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+
+  .packing-item-source {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
+    background: #f0e6dc;
+    color: #6b5a4d;
+  }
+
+  .packing-item-note {
+    font-size: 12px;
+    color: #8a5a2d;
+    margin-top: 2px;
+  }
   .packing-costume-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; max-height: 280px; overflow-y: auto; padding-right: 4px; }
   .packing-costume-card { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; padding: 10px 12px; background: #fff; border: 1px solid #e4d8cc; border-radius: 8px; cursor: pointer; text-align: left; transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease; }
   .packing-costume-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgb(62 42 24 / .1); border-color: #c9a67e; }
