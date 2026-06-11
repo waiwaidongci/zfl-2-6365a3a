@@ -102,30 +102,30 @@
   function lend(id) {
     const borrower = prompt('借出给谁？');
     if (!borrower) return;
-    const item = costumes.find((c) => c.id === id);
-    if (!item) return;
+    const costume = costumes.find((c) => c.id === id);
+    if (!costume) return;
     const dueDate = iso(7);
-    costumes = costumes.map((item) => item.id === id ? { ...item, borrower, due: dueDate, status: '借出' } : item);
+    costumes = costumes.map((c) => c.id === id ? { ...c, borrower, due: dueDate, status: '借出' } : c);
     persist();
-    addRecord('借出', item, borrower, `借出「${item.name}」给${borrower}，应还日期：${dueDate}`);
+    addRecord('借出', costume, borrower, `借出「${costume.name}」给${borrower}，应还日期：${dueDate}`);
   }
 
   function returnBack(id) {
-    const item = costumes.find((c) => c.id === id);
-    if (!item) return;
-    const borrower = item.borrower;
-    costumes = costumes.map((item) => item.id === id ? { ...item, borrower: '', due: '', status: '在库', clean: '待清洗' } : item);
+    const costume = costumes.find((c) => c.id === id);
+    if (!costume) return;
+    const borrower = costume.borrower;
+    costumes = costumes.map((c) => c.id === id ? { ...c, borrower: '', due: '', status: '在库', clean: '待清洗' } : c);
     persist();
-    addRecord('归还', item, borrower, `${borrower}归还「${item.name}」，状态变更为待清洗`);
+    addRecord('归还', costume, borrower, `${borrower}归还「${costume.name}」，状态变更为待清洗`);
   }
 
   function updateClean(id, clean) {
-    const item = costumes.find((c) => c.id === id);
-    if (!item) return;
-    const oldClean = item.clean;
-    costumes = costumes.map((item) => item.id === id ? { ...item, clean } : item);
+    const costume = costumes.find((c) => c.id === id);
+    if (!costume) return;
+    const oldClean = costume.clean;
+    costumes = costumes.map((c) => c.id === id ? { ...c, clean } : c);
     persist();
-    addRecord('清洗', item, '系统', `「${item.name}」清洗状态从「${oldClean}」变更为「${clean}」`);
+    addRecord('清洗', costume, '系统', `「${costume.name}」清洗状态从「${oldClean}」变更为「${clean}」`);
   }
 
   function openDetail(item) {
