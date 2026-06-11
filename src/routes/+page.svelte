@@ -1,6 +1,22 @@
 <script>
   import { onMount } from 'svelte';
-  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal, Package, Printer, Box, AlertOctagon } from 'lucide-svelte';
+  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal, Package, Printer, Box, AlertOctagon, Database, RefreshCw, HardDrive } from 'lucide-svelte';
+  import {
+    initializeDatabase,
+    getAll,
+    setAll,
+    insertOne,
+    updateOne,
+    deleteOne,
+    downloadBackup,
+    readBackupFile,
+    importFullDatabase,
+    exportFullDatabase,
+    getDBStats,
+    isLegacyDataPresent,
+    removeLegacyKeys,
+    TABLES
+  } from '$lib/database.js';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -112,57 +128,169 @@
   let showDeleteActorConfirm = false;
   let lendingActorId = '';
 
+  let dbStats = null;
+  let showDataManager = false;
+  let restorePreview = null;
+  let restoreFileContent = '';
+  let restoreError = '';
+  let dbMigrationNotice = '';
+
   onMount(() => {
-    const stored = localStorage.getItem('zfl-2-costumes');
-    if (stored) costumes = JSON.parse(stored);
-    const storedRecords = localStorage.getItem('zfl-2-records');
-    if (storedRecords) records = JSON.parse(storedRecords);
-    const storedReservations = localStorage.getItem('zfl-2-reservations');
-    if (storedReservations) reservations = JSON.parse(storedReservations);
-    const storedWorkOrders = localStorage.getItem('zfl-2-work-orders');
-    if (storedWorkOrders) workOrders = JSON.parse(storedWorkOrders);
-    const storedActors = localStorage.getItem('zfl-2-actors');
-    if (storedActors) actors = JSON.parse(storedActors);
-    const storedPackingLists = localStorage.getItem('zfl-2-packing-lists');
-    if (storedPackingLists) packingLists = JSON.parse(storedPackingLists);
+    const hadLegacy = isLegacyDataPresent();
+    const db = initializeDatabase();
+    costumes = db.tables[TABLES.costumes] || [];
+    records = db.tables[TABLES.records] || [];
+    reservations = db.tables[TABLES.reservations] || [];
+    workOrders = db.tables[TABLES.workOrders] || [];
+    actors = db.tables[TABLES.actors] || [];
+    packingLists = db.tables[TABLES.packingLists] || [];
+    dbStats = getDBStats();
+    if (hadLegacy && db.migratedAt) {
+      dbMigrationNotice = '检测到旧版数据已自动迁移到新版数据层，可在数据管理中查看详情。';
+    }
   });
 
   let localStorageAvailable = typeof localStorage !== 'undefined';
 
   function persist() {
-    if (localStorageAvailable) {
-      localStorage.setItem('zfl-2-costumes', JSON.stringify(costumes));
-    }
+    setAll(TABLES.costumes, costumes);
   }
 
   function persistRecords() {
-    if (localStorageAvailable) {
-      localStorage.setItem('zfl-2-records', JSON.stringify(records));
-    }
+    setAll(TABLES.records, records);
   }
 
   function persistReservations() {
-    if (localStorageAvailable) {
-      localStorage.setItem('zfl-2-reservations', JSON.stringify(reservations));
-    }
+    setAll(TABLES.reservations, reservations);
   }
 
   function persistWorkOrders() {
-    if (localStorageAvailable) {
-      localStorage.setItem('zfl-2-work-orders', JSON.stringify(workOrders));
-    }
+    setAll(TABLES.workOrders, workOrders);
   }
 
   function persistActors() {
-    if (localStorageAvailable) {
-      localStorage.setItem('zfl-2-actors', JSON.stringify(actors));
-    }
+    setAll(TABLES.actors, actors);
   }
 
   function persistPackingLists() {
-    if (localStorageAvailable) {
-      localStorage.setItem('zfl-2-packing-lists', JSON.stringify(packingLists));
+    setAll(TABLES.packingLists, packingLists);
+  }
+
+  function refreshDBStats() {
+    dbStats = getDBStats();
+  }
+
+  async function handleRestoreFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    restoreError = '';
+    restorePreview = null;
+    restoreFileContent = '';
+    const content = await readBackupFile(file);
+    if (!content) {
+      restoreError = '无法读取文件内容';
+      e.target.value = '';
+      return;
     }
+    let data;
+    try {
+      data = JSON.parse(content);
+    } catch (err) {
+      restoreError = 'JSON 解析失败，请检查文件格式';
+      e.target.value = '';
+      return;
+    }
+    if (!data || !data.tables || typeof data.tables !== 'object') {
+      if (Array.isArray(data)) {
+        restorePreview = {
+          fileName: file.name,
+          version: null,
+          legacyFormat: true,
+          costumeCount: data.length,
+          tables: {}
+        };
+        restoreFileContent = content;
+      } else {
+        restoreError = '无法识别的备份文件格式';
+      }
+      e.target.value = '';
+      return;
+    }
+    restoreFileContent = content;
+    restorePreview = {
+      fileName: file.name,
+      version: data._meta?.version || null,
+      legacyFormat: false,
+      tables: {}
+    };
+    for (const table of Object.values(TABLES)) {
+      restorePreview.tables[table] = Array.isArray(data.tables[table]) ? data.tables[table].length : 0;
+    }
+    e.target.value = '';
+  }
+
+  function confirmRestore() {
+    if (!restorePreview || !restoreFileContent) return;
+    if (!confirm('恢复将覆盖当前所有数据，确定继续吗？此操作不可撤销。')) return;
+    if (restorePreview.legacyFormat) {
+      try {
+        const arr = JSON.parse(restoreFileContent);
+        if (Array.isArray(arr)) {
+          const empty = initializeDatabase();
+          empty.tables[TABLES.costumes] = arr;
+          const result = importFullDatabase(JSON.stringify({ tables: empty.tables }));
+          if (!result.ok) {
+            restoreError = result.error;
+            return;
+          }
+        }
+      } catch (e) {
+        restoreError = `恢复失败：${e.message}`;
+        return;
+      }
+    } else {
+      const result = importFullDatabase(restoreFileContent);
+      if (!result.ok) {
+        restoreError = result.error;
+        return;
+      }
+    }
+    const db = initializeDatabase();
+    costumes = db.tables[TABLES.costumes] || [];
+    records = db.tables[TABLES.records] || [];
+    reservations = db.tables[TABLES.reservations] || [];
+    workOrders = db.tables[TABLES.workOrders] || [];
+    actors = db.tables[TABLES.actors] || [];
+    packingLists = db.tables[TABLES.packingLists] || [];
+    refreshDBStats();
+    closeDataManager();
+  }
+
+  function clearRestorePreview() {
+    restorePreview = null;
+    restoreFileContent = '';
+    restoreError = '';
+  }
+
+  function openDataManager() {
+    refreshDBStats();
+    clearRestorePreview();
+    showDataManager = true;
+  }
+
+  function closeDataManager() {
+    showDataManager = false;
+    clearRestorePreview();
+  }
+
+  function dismissMigrationNotice() {
+    dbMigrationNotice = '';
+  }
+
+  function cleanLegacyData() {
+    if (!confirm('确定要清除旧版 localStorage 数据吗？新版数据层已独立保存，清除后不可恢复。')) return;
+    removeLegacyKeys();
+    refreshDBStats();
   }
 
   const packingItemStatuses = ['未标记', '已打包', '缺失', '需清洗', '已归还'];
@@ -1063,7 +1191,9 @@
 
   function handleModalKeydown(e) {
     if (e.key === 'Escape') {
-      if (reservingId) {
+      if (showDataManager) {
+        closeDataManager();
+      } else if (reservingId) {
         closeReserve();
       } else if (lendingId) {
         closeLend();
@@ -1103,8 +1233,21 @@
       <b><Archive size={18} />{cleanWaitCount}件待清洗</b>
       <b><Package size={18} />{packingLists.length}个装箱单</b>
       <b class:danger={overdueCount > 0}><AlertTriangle size={18} />{overdueCount}项逾期</b>
+      <button type="button" class="hero-data-btn" on:click={openDataManager}>
+        <Database size={16} />数据管理
+      </button>
     </div>
   </header>
+
+  {#if dbMigrationNotice}
+    <div class="migration-notice">
+      <div class="migration-notice-content">
+        <RefreshCw size={18} />
+        <span>{dbMigrationNotice}</span>
+      </div>
+      <button type="button" class="icon-btn" on:click={dismissMigrationNotice} aria-label="关闭提示"><X size={16} /></button>
+    </div>
+  {/if}
 
   <section class="workorder-stats">
     <div class="stats-panel">
@@ -1332,17 +1475,19 @@
   </section>
 
   <section class="panel">
-    <h2>数据导入导出</h2>
+    <h2><HardDrive size={18} />数据管理</h2>
     <div class="import-export-btns">
-      <button type="button" class="secondary" on:click={exportCostumes}>
-        <Download size={16} />导出JSON
+      <button type="button" on:click={downloadBackup}>
+        <Download size={16} />完整备份
       </button>
-      <label class="file-input-label">
-        <Upload size={16} />导入JSON
-        <input type="file" accept=".json" on:change={handleImportFile} hidden />
-      </label>
+      <button type="button" class="secondary" on:click={exportCostumes}>
+        <Download size={16} />仅导服装
+      </button>
+      <button type="button" class="secondary" on:click={openDataManager}>
+        <Database size={16} />高级管理
+      </button>
     </div>
-    <p class="hint">导出当前所有服装档案为JSON文件，或从JSON文件导入新的服装记录。</p>
+    <p class="hint">「完整备份」包含服装、借还记录、预约、工单、演员、装箱单等所有数据；「仅导服装」只导出服装档案，兼容旧版导入格式。</p>
   </section>
 
   <section class="panel">
@@ -2480,6 +2625,163 @@
       </div>
     </div>
   {/if}
+
+  {#if showDataManager}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay" role="presentation" on:click={closeDataManager}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal modal-wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="data-manager-title"
+        on:click|stopPropagation
+        on:keydown={handleModalKeydown}
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h2 id="data-manager-title"><Database size={20} />数据管理</h2>
+          <button type="button" class="icon-btn" on:click={closeDataManager} aria-label="关闭"><X size={20} /></button>
+        </div>
+        <div class="data-manager-body">
+          {#if dbStats}
+            <div class="data-manager-section">
+              <h3><HardDrive size={16} />当前数据概览</h3>
+              <div class="db-info-row">
+                <span>数据层版本</span>
+                <strong>v{dbStats.version}</strong>
+              </div>
+              {#if dbStats.migratedAt}
+                <div class="db-info-row">
+                  <span>最近迁移</span>
+                  <strong>{formatTime(dbStats.migratedAt)}</strong>
+                </div>
+              {/if}
+              <div class="db-stats-grid">
+                <div class="db-stat-card">
+                  <div class="db-stat-num">{dbStats.tables.costumes}</div>
+                  <div class="db-stat-label">服装档案</div>
+                </div>
+                <div class="db-stat-card">
+                  <div class="db-stat-num">{dbStats.tables.records}</div>
+                  <div class="db-stat-label">借还记录</div>
+                </div>
+                <div class="db-stat-card">
+                  <div class="db-stat-num">{dbStats.tables.reservations}</div>
+                  <div class="db-stat-label">预约</div>
+                </div>
+                <div class="db-stat-card">
+                  <div class="db-stat-num">{dbStats.tables.workOrders}</div>
+                  <div class="db-stat-label">工单</div>
+                </div>
+                <div class="db-stat-card">
+                  <div class="db-stat-num">{dbStats.tables.actors}</div>
+                  <div class="db-stat-label">演员</div>
+                </div>
+                <div class="db-stat-card">
+                  <div class="db-stat-num">{dbStats.tables.packingLists}</div>
+                  <div class="db-stat-label">装箱单</div>
+                </div>
+              </div>
+            </div>
+          {/if}
+
+          <div class="data-manager-section">
+            <h3><Download size={16} />数据备份</h3>
+            <p class="hint">建议定期导出完整备份，防止浏览器清理 localStorage 导致数据丢失。</p>
+            <div class="data-manager-actions">
+              <button type="button" on:click={downloadBackup}>
+                <Download size={16} />导出完整备份
+              </button>
+              <button type="button" class="secondary" on:click={exportCostumes}>
+                <Download size={16} />仅导出服装
+              </button>
+            </div>
+          </div>
+
+          <div class="data-manager-section">
+            <h3><Upload size={16} />恢复数据</h3>
+            <p class="hint">选择之前导出的备份文件进行恢复。恢复将<strong>覆盖</strong>当前所有数据，请先备份现有数据。</p>
+            <label class="file-input-label">
+              <Upload size={16} />选择备份文件
+              <input type="file" accept=".json" on:change={handleRestoreFile} hidden />
+            </label>
+
+            {#if restoreError}
+              <div class="import-summary warning">
+                <AlertTriangle size={16} />
+                <span>{restoreError}</span>
+              </div>
+            {/if}
+
+            {#if restorePreview}
+              <div class="restore-preview">
+                <div class="import-summary success">
+                  <CheckCircle size={16} />
+                  <span>文件「{restorePreview.fileName}」解析成功</span>
+                </div>
+                {#if restorePreview.legacyFormat}
+                  <div class="import-summary warning">
+                    <AlertTriangle size={16} />
+                    <span>检测到<strong>旧版服装数据格式</strong>，将仅导入 {restorePreview.costumeCount} 条服装档案，其他数据表将保持当前内容。</span>
+                  </div>
+                {:else}
+                  <div class="db-info-row">
+                    <span>备份版本</span>
+                    <strong>{restorePreview.version ? `v${restorePreview.version}` : '未知版本'}</strong>
+                  </div>
+                  <div class="db-stats-grid db-stats-small">
+                    <div class="db-stat-card">
+                      <div class="db-stat-num">{restorePreview.tables.costumes || 0}</div>
+                      <div class="db-stat-label">服装</div>
+                    </div>
+                    <div class="db-stat-card">
+                      <div class="db-stat-num">{restorePreview.tables.records || 0}</div>
+                      <div class="db-stat-label">记录</div>
+                    </div>
+                    <div class="db-stat-card">
+                      <div class="db-stat-num">{restorePreview.tables.reservations || 0}</div>
+                      <div class="db-stat-label">预约</div>
+                    </div>
+                    <div class="db-stat-card">
+                      <div class="db-stat-num">{restorePreview.tables.workOrders || 0}</div>
+                      <div class="db-stat-label">工单</div>
+                    </div>
+                    <div class="db-stat-card">
+                      <div class="db-stat-num">{restorePreview.tables.actors || 0}</div>
+                      <div class="db-stat-label">演员</div>
+                    </div>
+                    <div class="db-stat-card">
+                      <div class="db-stat-num">{restorePreview.tables.packingLists || 0}</div>
+                      <div class="db-stat-label">装箱单</div>
+                    </div>
+                  </div>
+                {/if}
+                <div class="data-manager-actions">
+                  <button type="button" class="secondary" on:click={clearRestorePreview}>取消</button>
+                  <button type="button" class="danger" on:click={confirmRestore}>
+                    <RefreshCw size={16} />确认恢复（覆盖当前数据）
+                  </button>
+                </div>
+              </div>
+            {/if}
+          </div>
+
+          {#if isLegacyDataPresent()}
+            <div class="data-manager-section">
+              <h3><AlertTriangle size={16} />旧版数据</h3>
+              <p class="hint">检测到浏览器中仍有旧版分散的 localStorage 数据（zfl-2-costumes 等）。迁移完成后可安全清理。</p>
+              <div class="data-manager-actions">
+                <button type="button" class="danger-outline" on:click={cleanLegacyData}>
+                  <Trash2 size={16} />清除旧版数据
+                </button>
+              </div>
+            </div>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -2555,7 +2857,7 @@
   .confirm-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
   .confirm-actions button { min-width: 100px; }
   .import-export-btns { display: flex; gap: 10px; margin-bottom: 10px; }
-  .import-export-btns button, .import-export-btns .file-input-label { flex: 1; }
+  .import-export-btns button { flex: 1; }
   .file-input-label { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 11px 13px; border-radius: 8px; background: #603d2d; color: #fff; cursor: pointer; font: inherit; border: 0; }
   .hint { margin: 0; font-size: 13px; color: #8a7665; line-height: 1.5; }
   .modal-wide { max-width: 640px; }
@@ -2743,5 +3045,118 @@
     .packing-detail-table th, .packing-detail-table td { padding: 6px 8px; }
     .packing-summary-card { padding: 8px; }
     .packing-summary-num { font-size: 20px; }
+  }
+
+  .hero-data-btn {
+    background: rgb(255 255 255 / .18) !important;
+    border: 1px solid rgb(255 255 255 / .28) !important;
+    color: #fff !important;
+    padding: 10px 12px !important;
+  }
+  .hero-data-btn:hover { background: rgb(255 255 255 / .28) !important; }
+
+  .migration-notice {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin: 16px 0 0;
+    padding: 14px 18px;
+    background: #fff8e6;
+    border: 1px solid #e0c98a;
+    border-radius: 8px;
+  }
+  .migration-notice-content {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    color: #6b4a1a;
+    font-size: 14px;
+    flex: 1;
+  }
+  .migration-notice .icon-btn { color: #6b4a1a; }
+  .migration-notice .icon-btn:hover { background: #fff0cc; }
+
+  .data-manager-body {
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 22px;
+  }
+  .data-manager-section {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 16px;
+    background: #faf6f2;
+    border: 1px solid #e4d8cc;
+    border-radius: 8px;
+  }
+  .data-manager-section h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    color: #3b2f26;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .data-manager-section .hint {
+    margin: 0;
+  }
+  .data-manager-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .data-manager-actions button {
+    flex: 1;
+    min-width: 160px;
+  }
+
+  .db-info-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 0;
+    border-bottom: 1px dashed #e4d8cc;
+    font-size: 14px;
+  }
+  .db-info-row:last-child { border-bottom: none; }
+  .db-info-row span { color: #6b5a4d; }
+  .db-info-row strong { color: #26211c; font-weight: 600; }
+
+  .db-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(100px, 1fr));
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .db-stats-grid.db-stats-small .db-stat-card { padding: 10px 8px; }
+  .db-stats-grid.db-stats-small .db-stat-num { font-size: 20px; }
+  .db-stat-card {
+    padding: 12px 10px;
+    background: #fff;
+    border: 1px solid #e4d8cc;
+    border-radius: 8px;
+    text-align: center;
+  }
+  .db-stat-num {
+    font-size: 24px;
+    font-weight: 700;
+    color: #603d2d;
+    line-height: 1;
+  }
+  .db-stat-label {
+    font-size: 12px;
+    color: #6b5a4d;
+    margin-top: 6px;
+  }
+
+  .restore-preview {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-top: 4px;
   }
 </style>
