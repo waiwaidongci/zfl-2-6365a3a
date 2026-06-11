@@ -25,9 +25,16 @@
     { id: crypto.randomUUID(), type: '维修', costumeId: seed[0].id, costumeName: seed[0].name, play: seed[0].play, status: '维修中', assignee: '李师傅', dueDate: iso(5), note: '领口脱线，需要缝补', createdAt: new Date(Date.now() - 86400000).toISOString(), updatedAt: new Date().toISOString() }
   ];
 
+  const seedActors = [
+    { id: crypto.randomUUID(), name: '许舟', size: 'M', plays: ['海上信笺'], note: '身材匀称，偏好稍宽松版型' },
+    { id: crypto.randomUUID(), name: '陈一', size: 'XL', plays: ['午夜排练'], note: '' },
+    { id: crypto.randomUUID(), name: '林婉', size: 'S', plays: ['海上信笺', '午夜排练'], note: '身高162，肩膀较窄' }
+  ];
+
   let costumes = seed;
   let reservations = seedReservations;
   let workOrders = seedWorkOrders;
+  let actors = seedActors;
   let query = '';
   let playFilter = '全部剧目';
   let showOverdue = false;
@@ -65,6 +72,12 @@
     dueDate: iso(3),
     note: ''
   };
+  let actorForm = { name: '', size: '', plays: '', note: '' };
+  let actorQuery = '';
+  let selectedActorId = null;
+  let editActorForm = { name: '', size: '', plays: '', note: '' };
+  let showDeleteActorConfirm = false;
+  let lendingActorId = '';
 
   onMount(() => {
     const stored = localStorage.getItem('zfl-2-costumes');
@@ -75,6 +88,8 @@
     if (storedReservations) reservations = JSON.parse(storedReservations);
     const storedWorkOrders = localStorage.getItem('zfl-2-work-orders');
     if (storedWorkOrders) workOrders = JSON.parse(storedWorkOrders);
+    const storedActors = localStorage.getItem('zfl-2-actors');
+    if (storedActors) actors = JSON.parse(storedActors);
   });
 
   let localStorageAvailable = typeof localStorage !== 'undefined';
@@ -101,6 +116,52 @@
     if (localStorageAvailable) {
       localStorage.setItem('zfl-2-work-orders', JSON.stringify(workOrders));
     }
+  }
+
+  function persistActors() {
+    if (localStorageAvailable) {
+      localStorage.setItem('zfl-2-actors', JSON.stringify(actors));
+    }
+  }
+
+  const sizeOrder = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
+
+  function parseSize(sizeStr) {
+    if (!sizeStr) return null;
+    const s = sizeStr.trim().toUpperCase();
+    const idx = sizeOrder.indexOf(s);
+    if (idx >= 0) return idx;
+    const numMatch = s.match(/(\d+)/);
+    if (numMatch) {
+      const num = parseInt(numMatch[1]);
+      if (num >= 150 && num <= 200) return Math.round((num - 150) / 10);
+    }
+    return null;
+  }
+
+  function matchSize(costumeSize, actorSize) {
+    const c = parseSize(costumeSize);
+    const a = parseSize(actorSize);
+    if (c === null || a === null) return { level: 'unknown', label: '尺码信息不全', diff: 0 };
+    const diff = c - a;
+    if (diff === 0) return { level: 'perfect', label: '尺码完全匹配', diff: 0 };
+    if (Math.abs(diff) === 1) return { level: diff > 0 ? 'loose' : 'tight', label: diff > 0 ? '服装稍大' : '服装稍小', diff };
+    return { level: 'mismatch', label: diff > 0 ? '服装过大' : '服装过小', diff };
+  }
+
+  function getActorById(id) {
+    return actors.find((a) => a.id === id);
+  }
+
+  function getActorsByPlay(play) {
+    return actors.filter((a) => Array.isArray(a.plays) && a.plays.includes(play));
+  }
+
+  function getMatchBadgeClass(level) {
+    if (level === 'perfect') return 'match-perfect';
+    if (level === 'loose' || level === 'tight') return 'match-close';
+    if (level === 'mismatch') return 'match-mismatch';
+    return 'match-unknown';
   }
 
   function getActiveWorkOrder(costumeId) {
@@ -453,6 +514,64 @@
     persistRecords();
   }
 
+  function parsePlaysString(playsStr) {
+    if (!playsStr) return [];
+    return playsStr.split(/[,，、\s]+/).map((s) => s.trim()).filter(Boolean);
+  }
+
+  function saveActor() {
+    if (!actorForm.name.trim()) return;
+    const plays = parsePlaysString(actorForm.plays);
+    const newActor = {
+      id: crypto.randomUUID(),
+      name: actorForm.name.trim(),
+      size: actorForm.size.trim(),
+      plays,
+      note: actorForm.note.trim()
+    };
+    actors = [newActor, ...actors];
+    persistActors();
+    actorForm = { name: '', size: '', plays: '', note: '' };
+  }
+
+  function openActorDetail(actor) {
+    selectedActorId = actor.id;
+    editActorForm = {
+      name: actor.name,
+      size: actor.size,
+      plays: Array.isArray(actor.plays) ? actor.plays.join('、') : '',
+      note: actor.note
+    };
+    showDeleteActorConfirm = false;
+  }
+
+  function closeActorDetail() {
+    selectedActorId = null;
+    showDeleteActorConfirm = false;
+  }
+
+  function saveActorDetail() {
+    if (!editActorForm.name.trim()) return;
+    const plays = parsePlaysString(editActorForm.plays);
+    actors = actors.map((a) => a.id === selectedActorId ? { ...a, name: editActorForm.name.trim(), size: editActorForm.size.trim(), plays, note: editActorForm.note.trim() } : a);
+    persistActors();
+    closeActorDetail();
+  }
+
+  function askDeleteActor() {
+    showDeleteActorConfirm = true;
+  }
+
+  function cancelDeleteActor() {
+    showDeleteActorConfirm = false;
+  }
+
+  function confirmDeleteActor() {
+    actors = actors.filter((a) => a.id !== selectedActorId);
+    persistActors();
+    closeActorDetail();
+  }
+
   function formatTime(isoString) {
     const date = new Date(isoString);
     const year = date.getFullYear();
@@ -514,6 +633,13 @@
   }).sort((a, b) => new Date(a.date) - new Date(b.date));
   $: reservingCostume = costumes.find((item) => item.id === reservingId);
   $: currentConflicts = reservingCostume ? checkConflict(reservingCostume.id, reservationForm.date) : [];
+  $: filteredActors = actors.filter((a) => {
+    const text = `${a.name}${a.size}${(a.plays || []).join('')}${a.note}`;
+    return text.includes(actorQuery.trim());
+  });
+  $: selectedActor = actors.find((a) => a.id === selectedActorId);
+  $: lendingActor = actors.find((a) => a.id === lendingActorId);
+  $: lendingSizeMatch = lendingCostume && lendingActor ? matchSize(lendingCostume.size, lendingActor.size) : null;
 
   function saveCostume() {
     if (!form.name.trim() || !form.play.trim()) return;
@@ -532,15 +658,20 @@
     }
     lendingId = id;
     lendingBorrower = '';
+    lendingActorId = '';
   }
 
   function closeLend() {
     lendingId = null;
     lendingBorrower = '';
+    lendingActorId = '';
   }
 
   function confirmLend() {
-    const borrower = lendingBorrower.trim();
+    let borrower = lendingBorrower.trim();
+    if (!borrower && lendingActor) {
+      borrower = lendingActor.name;
+    }
     if (!borrower) return;
     const costume = costumes.find((c) => c.id === lendingId);
     if (!costume) return;
@@ -552,7 +683,11 @@
     const dueDate = iso(7);
     costumes = costumes.map((c) => c.id === lendingId ? { ...c, borrower, due: dueDate, status: '借出' } : c);
     persist();
-    addRecord('借出', costume, borrower, `借出「${costume.name}」给${borrower}，应还日期：${dueDate}`);
+    let summary = `借出「${costume.name}」给${borrower}，应还日期：${dueDate}`;
+    if (lendingActor && lendingSizeMatch) {
+      summary += `，尺码匹配：${lendingSizeMatch.label}`;
+    }
+    addRecord('借出', costume, borrower, summary);
     closeLend();
   }
 
@@ -698,6 +833,10 @@
         closeWorkOrderModal();
       } else if (selectedWorkOrderId) {
         closeWorkOrderDetail();
+      } else if (showDeleteActorConfirm) {
+        cancelDeleteActor();
+      } else if (selectedActorId) {
+        closeActorDetail();
       } else if (selectedId) {
         closeDetail();
       }
@@ -857,13 +996,83 @@
     </section>
   </section>
 
+  <section class="panel actor-panel">
+    <div class="record-header">
+      <h2><Users size={18} />演员尺码档案</h2>
+      <span class="record-count">共 {filteredActors.length} 位演员</span>
+    </div>
+    <div class="actor-layout">
+      <form class="actor-form" on:submit|preventDefault={saveActor}>
+        <h3 style="margin: 0 0 10px; font-size: 15px;">新增演员</h3>
+        <input bind:value={actorForm.name} placeholder="演员姓名" required />
+        <div class="split">
+          <input bind:value={actorForm.size} placeholder="常用尺码 (如 M/L/XL)" />
+          <input bind:value={actorForm.plays} placeholder="参演剧目 (用顿号分隔)" />
+        </div>
+        <input bind:value={actorForm.note} placeholder="备注" />
+        <button type="submit"><Plus size={14} />保存档案</button>
+      </form>
+      <div class="actor-list-wrapper">
+        <div class="record-toolbar" style="margin-bottom: 10px;">
+          <label><Search size={16} /><input bind:value={actorQuery} placeholder="搜索演员/尺码/剧目" /></label>
+        </div>
+        <div class="actor-list">
+          {#each filteredActors as actor}
+            <div class="actor-card" on:click={() => openActorDetail(actor)}>
+              <div class="actor-card-header">
+                <strong class="actor-name">{actor.name}</strong>
+                <span class="actor-size-tag">{actor.size || '未填尺码'}</span>
+              </div>
+              {#if actor.plays && actor.plays.length > 0}
+                <div class="actor-plays">
+                  {#each actor.plays as play}
+                    <span class="record-play-tag">{play}</span>
+                  {/each}
+                </div>
+              {/if}
+              {#if actor.note}
+                <p class="actor-note">{actor.note}</p>
+              {/if}
+            </div>
+          {/each}
+          {#if filteredActors.length === 0}
+            <div class="record-empty" style="padding: 20px;">
+              <Users size={24} />
+              <p>暂无演员档案</p>
+            </div>
+          {/if}
+        </div>
+      </div>
+    </div>
+  </section>
+
   <section class="panel">
     <h2>按剧目查看</h2>
     <div class="playGrid">
       {#each plays.filter((play) => play !== '全部剧目') as play}
-        <button type="button" on:click={() => playFilter = play}>
+        {@const playActors = getActorsByPlay(play)}
+        {@const playCostumes = costumes.filter((c) => c.play === play)}
+        <button type="button" class="play-card" on:click={() => playFilter = play}>
           <strong>{play}</strong>
-          <span>{costumes.filter((item) => item.play === play).length}件</span>
+          <div class="play-card-stats">
+            <span><Shirt size={12} />{playCostumes.length}件服装</span>
+            <span><Users size={12} />{playActors.length}位演员</span>
+          </div>
+          {#if playActors.length > 0 && playCostumes.length > 0}
+            <div class="play-match-summary">
+              {#each playActors.slice(0, 3) as pa}
+                {@const bestMatch = playCostumes
+                  .filter((c) => c.status === '在库' && c.clean === '已清洗')
+                  .map((c) => ({ costume: c, match: matchSize(c.size, pa.size) }))
+                  .sort((a, b) => Math.abs(a.match.diff) - Math.abs(b.match.diff))[0]}
+                {#if bestMatch}
+                  <span class="mini-match" class:match-perfect={bestMatch.match.level === 'perfect'} class:match-close={bestMatch.match.level === 'loose' || bestMatch.match.level === 'tight'} class:match-mismatch={bestMatch.match.level === 'mismatch'}>
+                    {pa.name}→{bestMatch.costume.name}
+                  </span>
+                {/if}
+              {/each}
+            </div>
+          {/if}
         </button>
       {/each}
     </div>
@@ -1163,6 +1372,92 @@
     </div>
   {/if}
 
+  {#if selectedActor}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay" role="presentation" on:click={closeActorDetail}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="actor-detail-title"
+        on:click|stopPropagation
+        on:keydown={handleModalKeydown}
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h2 id="actor-detail-title">演员档案</h2>
+          <button type="button" class="icon-btn" on:click={closeActorDetail} aria-label="关闭"><X size={20} /></button>
+        </div>
+
+        {#if showDeleteActorConfirm}
+          <div class="confirm-box">
+            <p>确定要删除「{selectedActor.name}」的档案吗？此操作不可撤销。</p>
+            <div class="confirm-actions">
+              <button type="button" class="secondary" on:click={cancelDeleteActor}>取消</button>
+              <button type="button" class="danger" on:click={confirmDeleteActor}><Trash2 size={16} />确认删除</button>
+            </div>
+          </div>
+        {:else}
+          <form class="detail-form" on:submit|preventDefault={saveActorDetail}>
+            <label>
+              <span>演员姓名</span>
+              <input bind:value={editActorForm.name} placeholder="演员姓名" required />
+            </label>
+            <div class="split">
+              <label>
+                <span>常用尺码</span>
+                <input bind:value={editActorForm.size} placeholder="常用尺码 (如 M/L/XL)" />
+              </label>
+              <label>
+                <span>参演剧目</span>
+                <input bind:value={editActorForm.plays} placeholder="用顿号、逗号或空格分隔" />
+              </label>
+            </div>
+            <label>
+              <span>备注</span>
+              <input bind:value={editActorForm.note} placeholder="备注" />
+            </label>
+
+            {#if selectedActor.plays && selectedActor.plays.length > 0}
+              <div class="status-info">
+                <p><strong>参演剧目：</strong></p>
+                <div style="display: flex; gap: 6px; flex-wrap: wrap; margin-top: 4px;">
+                  {#each selectedActor.plays as play}
+                    <span class="record-play-tag">{play}</span>
+                  {/each}
+                </div>
+              </div>
+            {/if}
+
+            {#if selectedActor.size}
+              <div class="status-info">
+                <p><strong>尺码匹配建议：</strong></p>
+                <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 6px;">
+                  {#each costumes.filter((c) => c.status === '在库' && c.clean === '已清洗').slice(0, 5) as costume}
+                    {@const m = matchSize(costume.size, selectedActor.size)}
+                    <div class="actor-match-row">
+                      <span class="actor-match-costume">{costume.name} ({costume.size || '未填'})</span>
+                      <span class="match-badge {getMatchBadgeClass(m.level)}">{m.label}</span>
+                    </div>
+                  {/each}
+                  {#if costumes.filter((c) => c.status === '在库' && c.clean === '已清洗').length === 0}
+                    <span style="color: #8a7665; font-size: 13px;">暂无可借出的服装</span>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+
+            <div class="modal-actions">
+              <button type="button" class="danger-outline" on:click={askDeleteActor}><Trash2 size={16} />删除档案</button>
+              <button type="submit"><Save size={16} />保存修改</button>
+            </div>
+          </form>
+        {/if}
+      </div>
+    </div>
+  {/if}
+
   {#if lendingCostume}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modal-overlay" role="presentation" on:click={closeLend}>
@@ -1184,11 +1479,46 @@
           <div class="status-info">
             <p><strong>服装：</strong>{lendingCostume.name}</p>
             <p><strong>剧目：</strong>{lendingCostume.play}</p>
+            <p><strong>服装尺码：</strong>{lendingCostume.size || '未填'}</p>
             <p><strong>应还日期：</strong>{iso(7)}</p>
           </div>
           <label>
+            <span>选择演员（可选）</span>
+            <select bind:value={lendingActorId} on:change={() => {
+              if (lendingActorId) {
+                const a = getActorById(lendingActorId);
+                if (a) lendingBorrower = a.name;
+              }
+            }}>
+              <option value="">不选择演员，手动输入借用人</option>
+              {#each actors as actor}
+                <option value={actor.id}>{actor.name} ({actor.size || '未填尺码'})</option>
+              {/each}
+            </select>
+          </label>
+          {#if lendingActor && lendingSizeMatch}
+            <div class="size-match-box" class:match-perfect={lendingSizeMatch.level === 'perfect'} class:match-close={lendingSizeMatch.level === 'loose' || lendingSizeMatch.level === 'tight'} class:match-mismatch={lendingSizeMatch.level === 'mismatch'} class:match-unknown={lendingSizeMatch.level === 'unknown'}>
+              <div class="size-match-title">
+                {#if lendingSizeMatch.level === 'perfect'}
+                  <CheckCircle size={16} />
+                {:else if lendingSizeMatch.level === 'loose' || lendingSizeMatch.level === 'tight'}
+                  <AlertTriangle size={16} />
+                {:else if lendingSizeMatch.level === 'mismatch'}
+                  <XCircle size={16} />
+                {:else}
+                  <AlertTriangle size={16} />
+                {/if}
+                <strong>尺码匹配：{lendingSizeMatch.label}</strong>
+              </div>
+              <p class="size-match-detail">服装尺码：{lendingCostume.size || '未填'}，演员尺码：{lendingActor.size || '未填'}</p>
+              {#if lendingActor.note}
+                <p class="size-match-detail">演员备注：{lendingActor.note}</p>
+              {/if}
+            </div>
+          {/if}
+          <label>
             <span>借用人</span>
-            <input bind:value={lendingBorrower} placeholder="请输入借用人" required />
+            <input bind:value={lendingBorrower} placeholder="请输入借用人姓名" required />
           </label>
           <div class="modal-actions">
             <button type="button" class="secondary" on:click={closeLend}>取消</button>
@@ -1631,5 +1961,40 @@
   .conflict-box { background: #fff4e6; border: 1px solid #e0c9a8; border-radius: 8px; padding: 12px 14px; }
   .conflict-title { display: flex; align-items: center; gap: 8px; color: #8a5a1a; margin-bottom: 8px; }
   .conflict-item { margin: 2px 0; font-size: 13px; color: #6b4a2a; }
-  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar, .record-toolbar { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } .record-item { flex-direction: column; } .record-footer { flex-direction: column; align-items: flex-start; } .stats-grid { grid-template-columns: repeat(2, 1fr); } .stat-number { font-size: 22px; } .stat-card { padding: 12px; gap: 10px; } .stat-icon { width: 40px; height: 40px; } }
+  .actor-layout { display: grid; grid-template-columns: 280px 1fr; gap: 16px; align-items: start; }
+  .actor-form { display: flex; flex-direction: column; gap: 10px; padding: 14px; background: #faf6f2; border-radius: 8px; border: 1px solid #e4d8cc; }
+  .actor-list-wrapper { display: flex; flex-direction: column; gap: 10px; }
+  .actor-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; max-height: 400px; overflow-y: auto; padding-right: 4px; }
+  .actor-card { padding: 14px; border: 1px solid #eadfd4; border-radius: 8px; background: #fffaf5; cursor: pointer; transition: transform .15s ease, box-shadow .15s ease; }
+  .actor-card:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgb(62 42 24 / .12); }
+  .actor-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .actor-name { font-size: 15px; color: #26211c; }
+  .actor-size-tag { font-size: 12px; color: #1a4a8a; background: #e6eef6; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
+  .actor-plays { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 6px; }
+  .actor-note { margin: 0; font-size: 12px; color: #6b5a4d; line-height: 1.4; }
+  .play-card { flex-direction: column; align-items: flex-start; padding: 14px; text-align: left; gap: 8px; }
+  .play-card strong { font-size: 15px; }
+  .play-card-stats { display: flex; gap: 12px; }
+  .play-card-stats span { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: #6b5a4d; background: transparent; padding: 0; }
+  .play-match-summary { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .mini-match { font-size: 11px; padding: 2px 6px; border-radius: 4px; background: #f0e6dc; color: #6b5a4d; }
+  .size-match-box { border-radius: 8px; padding: 12px 14px; border: 1px solid; }
+  .size-match-box.match-perfect { background: #eef6ee; border-color: #b8d8b8; color: #2d5a2d; }
+  .size-match-box.match-close { background: #fff4e6; border-color: #e0c9a8; color: #8a5a1a; }
+  .size-match-box.match-mismatch { background: #fdecea; border-color: #e0b8b0; color: #8a2d2d; }
+  .size-match-box.match-unknown { background: #f6efe7; border-color: #e4d8cc; color: #6b5a4d; }
+  .size-match-title { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .size-match-detail { margin: 2px 0; font-size: 13px; }
+  .match-badge { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; }
+  .match-badge.match-perfect { background: #e6f0e6; color: #2d5a2d; }
+  .match-badge.match-close { background: #fff4e6; color: #8a5a1a; }
+  .match-badge.match-mismatch { background: #f6e6e6; color: #8a2d2d; }
+  .match-badge.match-unknown { background: #f6efe7; color: #6b5a4d; }
+  .mini-match.match-perfect { background: #e6f0e6; color: #2d5a2d; }
+  .mini-match.match-close { background: #fff4e6; color: #8a5a1a; }
+  .mini-match.match-mismatch { background: #f6e6e6; color: #8a2d2d; }
+  .actor-match-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px dashed #e4d8cc; }
+  .actor-match-row:last-child { border-bottom: none; }
+  .actor-match-costume { font-size: 13px; color: #3b2f26; }
+  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar, .record-toolbar, .actor-layout { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } .record-item { flex-direction: column; } .record-footer { flex-direction: column; align-items: flex-start; } .stats-grid { grid-template-columns: repeat(2, 1fr); } .stat-number { font-size: 22px; } .stat-card { padding: 12px; gap: 10px; } .stat-icon { width: 40px; height: 40px; } .actor-list { grid-template-columns: 1fr; } }
 </style>
