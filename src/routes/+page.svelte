@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle } from 'lucide-svelte';
+  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw } from 'lucide-svelte';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -27,10 +27,14 @@
   let importPreview = [];
   let importSkipped = [];
   let importFile = null;
+  let records = [];
+  let recordQuery = '';
 
   onMount(() => {
     const stored = localStorage.getItem('zfl-2-costumes');
     if (stored) costumes = JSON.parse(stored);
+    const storedRecords = localStorage.getItem('zfl-2-records');
+    if (storedRecords) records = JSON.parse(storedRecords);
   });
 
   let localStorageAvailable = typeof localStorage !== 'undefined';
@@ -40,6 +44,42 @@
       localStorage.setItem('zfl-2-costumes', JSON.stringify(costumes));
     }
   }
+
+  function persistRecords() {
+    if (localStorageAvailable) {
+      localStorage.setItem('zfl-2-records', JSON.stringify(records));
+    }
+  }
+
+  function addRecord(type, costume, operator, summary) {
+    const record = {
+      id: crypto.randomUUID(),
+      timestamp: new Date().toISOString(),
+      type,
+      costumeName: costume.name,
+      play: costume.play,
+      operator,
+      summary
+    };
+    records = [record, ...records];
+    persistRecords();
+  }
+
+  function formatTime(isoString) {
+    const date = new Date(isoString);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    const seconds = String(date.getSeconds()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
+  }
+
+  $: filteredRecords = records.filter((record) => {
+    const text = `${record.costumeName}${record.play}`;
+    return text.includes(recordQuery.trim());
+  });
   $: plays = ['全部剧目', ...new Set(costumes.map((item) => item.play).filter(Boolean))];
   $: filtered = costumes.filter((item) => {
     const text = `${item.name}${item.size}${item.play}${item.location}${item.borrower}`;
@@ -52,26 +92,40 @@
 
   function saveCostume() {
     if (!form.name.trim() || !form.play.trim()) return;
-    costumes = [{ id: crypto.randomUUID(), ...form }, ...costumes];
+    const newCostume = { id: crypto.randomUUID(), ...form };
+    costumes = [newCostume, ...costumes];
     persist();
+    addRecord('新增', newCostume, '系统', `新增服装「${newCostume.name}」，剧目：${newCostume.play}，尺码：${newCostume.size || '未填'}，位置：${newCostume.location || '未填'}`);
     form = { name: '', size: '', play: '', location: '', clean: '已清洗', borrower: '', due: '', status: '在库', note: '' };
   }
 
   function lend(id) {
     const borrower = prompt('借出给谁？');
     if (!borrower) return;
-    costumes = costumes.map((item) => item.id === id ? { ...item, borrower, due: iso(7), status: '借出' } : item);
+    const item = costumes.find((c) => c.id === id);
+    if (!item) return;
+    const dueDate = iso(7);
+    costumes = costumes.map((item) => item.id === id ? { ...item, borrower, due: dueDate, status: '借出' } : item);
     persist();
+    addRecord('借出', item, borrower, `借出「${item.name}」给${borrower}，应还日期：${dueDate}`);
   }
 
   function returnBack(id) {
+    const item = costumes.find((c) => c.id === id);
+    if (!item) return;
+    const borrower = item.borrower;
     costumes = costumes.map((item) => item.id === id ? { ...item, borrower: '', due: '', status: '在库', clean: '待清洗' } : item);
     persist();
+    addRecord('归还', item, borrower, `${borrower}归还「${item.name}」，状态变更为待清洗`);
   }
 
   function updateClean(id, clean) {
+    const item = costumes.find((c) => c.id === id);
+    if (!item) return;
+    const oldClean = item.clean;
     costumes = costumes.map((item) => item.id === id ? { ...item, clean } : item);
     persist();
+    addRecord('清洗', item, '系统', `「${item.name}」清洗状态从「${oldClean}」变更为「${clean}」`);
   }
 
   function openDetail(item) {
@@ -294,6 +348,52 @@
       </label>
     </div>
     <p class="hint">导出当前所有服装档案为JSON文件，或从JSON文件导入新的服装记录。</p>
+  </section>
+
+  <section class="panel">
+    <div class="record-header">
+      <h2><List size={18} />借还记录</h2>
+      <span class="record-count">共 {records.length} 条记录</span>
+    </div>
+    <div class="record-toolbar">
+      <label><Search size={16} /><input bind:value={recordQuery} placeholder="搜索服装名称或剧目" /></label>
+    </div>
+    <div class="record-list">
+      {#each filteredRecords as record}
+        <div class="record-item">
+          <div class="record-type-badge record-type-{record.type}">
+            {#if record.type === '新增'}
+              <Plus size={14} />
+            {:else if record.type === '借出'}
+              <Clock size={14} />
+            {:else if record.type === '归还'}
+              <Undo2 size={14} />
+            {:else if record.type === '清洗'}
+              <RotateCcw size={14} />
+            {/if}
+            {record.type}
+          </div>
+          <div class="record-content">
+            <div class="record-title-row">
+              <strong class="record-name">{record.costumeName}</strong>
+              <span class="record-play-tag">{record.play}</span>
+            </div>
+            <p class="record-summary">{record.summary}</p>
+            <div class="record-footer">
+              <span class="record-operator">操作者：{record.operator}</span>
+              <span class="record-time">{formatTime(record.timestamp)}</span>
+            </div>
+          </div>
+        </div>
+      {/each}
+      {#if filteredRecords.length === 0}
+        <div class="record-empty">
+          <List size={32} />
+          <p>暂无记录</p>
+          <span>进行操作后记录将显示在这里</span>
+        </div>
+      {/if}
+    </div>
   </section>
 
   {#if selected}
@@ -532,5 +632,29 @@
   .skipped-index { color: #b84a3b; font-weight: 500; }
   .skipped-name, .skipped-play { color: #6b5a4d; }
   button:disabled { opacity: .5; cursor: not-allowed; }
-  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } }
+  .record-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  .record-header h2 { display: flex; align-items: center; gap: 8px; margin: 0; }
+  .record-count { font-size: 13px; color: #8a7665; }
+  .record-toolbar { margin-bottom: 14px; }
+  .record-toolbar label { display: flex; align-items: center; gap: 8px; border: 1px solid #d8c8ba; border-radius: 8px; padding: 0 10px; }
+  .record-toolbar label input { border: 0; padding-left: 0; }
+  .record-list { display: flex; flex-direction: column; gap: 10px; max-height: 500px; overflow-y: auto; }
+  .record-item { display: flex; gap: 12px; padding: 14px; border: 1px solid #eadfd4; border-radius: 8px; background: #fffaf5; }
+  .record-type-badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; flex-shrink: 0; height: fit-content; }
+  .record-type-新增 { background: #e6f0e6; color: #2d5a2d; }
+  .record-type-借出 { background: #fff0e6; color: #8a4a1a; }
+  .record-type-归还 { background: #e6eef6; color: #1a4a8a; }
+  .record-type-清洗 { background: #f0e6f6; color: #5a1a8a; }
+  .record-content { flex: 1; min-width: 0; }
+  .record-title-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
+  .record-name { font-size: 15px; color: #26211c; }
+  .record-play-tag { font-size: 12px; color: #6b5a4d; background: #f0e6dc; padding: 2px 8px; border-radius: 4px; }
+  .record-summary { margin: 0 0 8px; font-size: 13px; color: #4a3b30; line-height: 1.5; }
+  .record-footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .record-operator { font-size: 12px; color: #6b5a4d; }
+  .record-time { font-size: 12px; color: #8a7665; font-family: 'SF Mono', Monaco, 'Courier New', monospace; }
+  .record-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 40px 20px; color: #8a7665; }
+  .record-empty p { margin: 0; font-size: 15px; color: #6b5a4d; }
+  .record-empty span { font-size: 13px; }
+  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } .record-item { flex-direction: column; } .record-footer { flex-direction: column; align-items: flex-start; } }
 </style>
