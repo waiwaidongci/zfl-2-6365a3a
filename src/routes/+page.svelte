@@ -29,8 +29,13 @@
     if (stored) costumes = JSON.parse(stored);
   });
 
-  $: localStorageAvailable = typeof localStorage !== 'undefined';
-  $: if (localStorageAvailable) localStorage.setItem('zfl-2-costumes', JSON.stringify(costumes));
+  let localStorageAvailable = typeof localStorage !== 'undefined';
+
+  function persist() {
+    if (localStorageAvailable) {
+      localStorage.setItem('zfl-2-costumes', JSON.stringify(costumes));
+    }
+  }
   $: plays = ['全部剧目', ...new Set(costumes.map((item) => item.play).filter(Boolean))];
   $: filtered = costumes.filter((item) => {
     const text = `${item.name}${item.size}${item.play}${item.location}${item.borrower}`;
@@ -44,6 +49,7 @@
   function saveCostume() {
     if (!form.name.trim() || !form.play.trim()) return;
     costumes = [{ id: crypto.randomUUID(), ...form }, ...costumes];
+    persist();
     form = { name: '', size: '', play: '', location: '', clean: '已清洗', borrower: '', due: '', status: '在库', note: '' };
   }
 
@@ -51,14 +57,17 @@
     const borrower = prompt('借出给谁？');
     if (!borrower) return;
     costumes = costumes.map((item) => item.id === id ? { ...item, borrower, due: iso(7), status: '借出' } : item);
+    persist();
   }
 
   function returnBack(id) {
     costumes = costumes.map((item) => item.id === id ? { ...item, borrower: '', due: '', status: '在库', clean: '待清洗' } : item);
+    persist();
   }
 
   function updateClean(id, clean) {
     costumes = costumes.map((item) => item.id === id ? { ...item, clean } : item);
+    persist();
   }
 
   function openDetail(item) {
@@ -82,6 +91,7 @@
   function saveDetail() {
     if (!editForm.name.trim() || !editForm.play.trim()) return;
     costumes = costumes.map((item) => item.id === selectedId ? { ...item, ...editForm } : item);
+    persist();
     closeDetail();
   }
 
@@ -95,10 +105,21 @@
 
   function confirmDelete() {
     costumes = costumes.filter((item) => item.id !== selectedId);
+    persist();
     closeDetail();
   }
 
   $: selected = costumes.find((item) => item.id === selectedId);
+
+  function handleModalKeydown(e) {
+    if (e.key === 'Escape') {
+      if (showDeleteConfirm) {
+        cancelDelete();
+      } else {
+        closeDetail();
+      }
+    }
+  }
 </script>
 
 <main>
@@ -146,14 +167,23 @@
 
       <div class="cards">
         {#each filtered as item}
-          <article class:item-overdue={item.status === '借出' && item.due && new Date(item.due) < new Date(iso(0))} class="card-clickable" on:click={() => openDetail(item)}>
+          <article
+            class:item-overdue={item.status === '借出' && item.due && new Date(item.due) < new Date(iso(0))}
+            class="card-clickable"
+          >
+            <button
+              type="button"
+              class="card-overlay-btn"
+              aria-label={`查看${item.name}详情`}
+              on:click={() => openDetail(item)}
+            ></button>
             <div>
               <strong>{item.name}</strong>
               <span>{item.play} · {item.size || '未填尺码'}</span>
             </div>
             <p>{item.location} · {item.clean}</p>
             <p>{item.status === '借出' ? `${item.borrower}借用至${item.due}` : '当前在库'}</p>
-            <div class="actions" on:click|stopPropagation>
+            <div class="actions" role="group" aria-label="服装操作">
               {#if item.status === '借出'}
                 <button type="button" on:click={() => returnBack(item.id)}><Undo2 size={16} />归还</button>
               {:else}
@@ -180,10 +210,20 @@
   </section>
 
   {#if selected}
-    <div class="modal-overlay" on:click={closeDetail}>
-      <div class="modal" on:click|stopPropagation>
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay" role="presentation" on:click={closeDetail}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="detail-title"
+        on:click|stopPropagation
+        on:keydown={handleModalKeydown}
+        tabindex="-1"
+      >
         <div class="modal-header">
-          <h2>服装详情</h2>
+          <h2 id="detail-title">服装详情</h2>
           <button type="button" class="icon-btn" on:click={closeDetail} aria-label="关闭"><X size={20} /></button>
         </div>
 
@@ -275,11 +315,13 @@
   .check { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
   .check input { width: auto; }
   .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
-  article { border: 1px solid #eadfd4; border-radius: 8px; padding: 16px; background: #fffaf5; }
+  article { position: relative; border: 1px solid #eadfd4; border-radius: 8px; padding: 16px; background: #fffaf5; }
   article strong, article span { display: block; }
   article span, article p { color: #6b5a4d; }
   .item-overdue { border-color: #d98664; background: #fff5ef; }
-  .actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+  .card-overlay-btn { position: absolute; inset: 0; background: transparent; border: 0; padding: 0; cursor: pointer; border-radius: 8px; z-index: 1; }
+  .card-overlay-btn:focus-visible { outline: 2px solid #603d2d; outline-offset: 2px; }
+  .actions { position: relative; z-index: 2; display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
   .secondary { background: #efe4d9; color: #37261d; }
   .playGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
   .playGrid button { justify-content: space-between; background: #f6efe7; color: #2a211b; border: 1px solid #e3d4c7; }
