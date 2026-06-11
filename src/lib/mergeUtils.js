@@ -460,10 +460,64 @@ function cleanupDanglingRefs(rec, table, deletedIds, validIds) {
   return modified ? result : rec;
 }
 
+function normalizeKey(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function isSameCostumeCandidate(current, imported) {
+  if (!current || !imported) return false;
+  const currentName = normalizeKey(current.name);
+  const importedName = normalizeKey(imported.name);
+  if (!currentName || currentName !== importedName) return false;
+
+  const stableFields = ['play', 'size'];
+  for (const field of stableFields) {
+    const currentValue = normalizeKey(current[field]);
+    const importedValue = normalizeKey(imported[field]);
+    if (currentValue && importedValue && currentValue !== importedValue) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function collectCostumeIdRemaps(diffResult, decisions) {
+  const remaps = {};
+  const usedAddedIds = new Set();
+  const costumeDiff = diffResult.tables[TABLES.costumes];
+  if (!costumeDiff) return { remaps, usedAddedIds };
+
+  const addedItems = costumeDiff[DIFF_TYPES.ADDED] || [];
+  const deletedItems = costumeDiff[DIFF_TYPES.DELETED_SUSPECT] || [];
+
+  for (const deleted of deletedItems) {
+    const deletedDecision = decisions[TABLES.costumes]?.[deleted.id];
+    if (!deletedDecision?.choice) continue;
+
+    const match = addedItems.find((added) => {
+      if (usedAddedIds.has(added.id)) return false;
+      const addedDecision = decisions[TABLES.costumes]?.[added.id];
+      if (addedDecision?.choice !== DECISION_CHOICES.USE_IMPORT) return false;
+      return isSameCostumeCandidate(deleted.current, added.imported);
+    });
+
+    if (match?.imported?.id) {
+      remaps[deleted.id] = match.imported.id;
+      usedAddedIds.add(match.id);
+    }
+  }
+
+  return { remaps, usedAddedIds };
+}
+
 export function applyMerge(currentDB, importDB, diffResult, decisions) {
   const merged = deepClone(currentDB);
   const costumeIdMap = {};
   const currentCostumeIds = new Set((merged.tables[TABLES.costumes] || []).map((c) => c.id));
+  const { remaps: changedCostumeIds, usedAddedIds } = collectCostumeIdRemaps(diffResult, decisions);
+  const deletedCostumeIds = new Set();
+  const skippedExistingIds = {};
 
   for (const table of MERGE_TABLES) {
     const td = diffResult.tables[table];
@@ -484,19 +538,32 @@ export function applyMerge(currentDB, importDB, diffResult, decisions) {
       const dec = decisions[table]?.[item.id];
       if (!dec || !dec.choice) continue;
 
+      if (
+        table === TABLES.costumes &&
+        dec.choice === DECISION_CHOICES.USE_IMPORT &&
+        item.current !== null &&
+        item.imported === null
+      ) {
+        skippedExistingIds[item.id] = true;
+        deletedCostumeIds.add(item.id);
+        continue;
+      }
+
       let rec = buildMergedRecord(item, dec.choice, dec.mergedData);
       if (!rec) continue;
 
       if (table === TABLES.costumes) {
+        if (changedCostumeIds[item.id]) {
+          costumeIdMap[item.id] = changedCostumeIds[item.id];
+          skippedExistingIds[item.id] = true;
+          continue;
+        }
         if (dec.choice === DECISION_CHOICES.USE_IMPORT && item.current === null) {
           if (currentCostumeIds.has(rec.id)) {
             const newId = crypto.randomUUID();
             costumeIdMap[rec.id] = newId;
             rec = { ...rec, id: newId };
           }
-        }
-        if (dec.choice === DECISION_CHOICES.USE_IMPORT && item.current !== null && item.imported === null) {
-          continue;
         }
       }
 
@@ -507,6 +574,9 @@ export function applyMerge(currentDB, importDB, diffResult, decisions) {
 
     if (table === TABLES.costumes || table === TABLES.actors) {
       for (const existing of merged.tables[table] || []) {
+        if (table === TABLES.costumes && skippedExistingIds[existing.id]) {
+          continue;
+        }
         if (!keepIds.has(existing.id)) {
           finalRecords.push(deepClone(existing));
         }
@@ -514,14 +584,6 @@ export function applyMerge(currentDB, importDB, diffResult, decisions) {
     }
 
     merged.tables[table] = finalRecords;
-  }
-
-  const deletedCostumeIds = new Set();
-  for (const item of diffResult.tables[TABLES.costumes]?.[DIFF_TYPES.DELETED_SUSPECT] || []) {
-    const dec = decisions[TABLES.costumes]?.[item.id];
-    if (dec?.choice === DECISION_CHOICES.USE_IMPORT) {
-      deletedCostumeIds.add(item.id);
-    }
   }
 
   const mergedCostumeIds = new Set((merged.tables[TABLES.costumes] || []).map((c) => c.id));
