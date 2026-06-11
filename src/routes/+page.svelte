@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal } from 'lucide-svelte';
+  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal, Package, Printer, Box, AlertOctagon } from 'lucide-svelte';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -31,10 +31,43 @@
     { id: crypto.randomUUID(), name: '林婉', size: 'S', plays: ['海上信笺', '午夜排练'], note: '身高162，肩膀较窄' }
   ];
 
+  const seedPackingLists = [
+    {
+      id: crypto.randomUUID(),
+      play: '海上信笺',
+      performanceDate: iso(3),
+      name: '首演装箱单',
+      note: '首演全套服装，含配饰',
+      createdAt: new Date().toISOString(),
+      items: [
+        { costumeId: seed[0].id, costumeName: seed[0].name, size: seed[0].size, location: seed[0].location, status: '已打包', note: '' },
+        { costumeId: seed[1].id, costumeName: seed[1].name, size: seed[1].size, location: seed[1].location, status: '需清洗', note: '袖口有污渍' }
+      ]
+    }
+  ];
+
   let costumes = seed;
   let reservations = seedReservations;
   let workOrders = seedWorkOrders;
   let actors = seedActors;
+  let packingLists = seedPackingLists;
+  let packingListQuery = '';
+  let packingListFilter = '全部';
+  let showPackingListModal = false;
+  let editingPackingListId = null;
+  let selectedPackingListId = null;
+  let showPackingListDetail = false;
+  let isPrintingPackingList = false;
+  let creatingPackingList = false;
+  let packingListForm = {
+    play: '',
+    performanceDate: iso(1),
+    name: '',
+    note: '',
+    items: []
+  };
+  let packingAddCostumeQuery = '';
+  let packingAddCostumePlayFilter = '全部剧目';
   let query = '';
   let playFilter = '全部剧目';
   let showOverdue = false;
@@ -90,6 +123,8 @@
     if (storedWorkOrders) workOrders = JSON.parse(storedWorkOrders);
     const storedActors = localStorage.getItem('zfl-2-actors');
     if (storedActors) actors = JSON.parse(storedActors);
+    const storedPackingLists = localStorage.getItem('zfl-2-packing-lists');
+    if (storedPackingLists) packingLists = JSON.parse(storedPackingLists);
   });
 
   let localStorageAvailable = typeof localStorage !== 'undefined';
@@ -122,6 +157,183 @@
     if (localStorageAvailable) {
       localStorage.setItem('zfl-2-actors', JSON.stringify(actors));
     }
+  }
+
+  function persistPackingLists() {
+    if (localStorageAvailable) {
+      localStorage.setItem('zfl-2-packing-lists', JSON.stringify(packingLists));
+    }
+  }
+
+  const packingItemStatuses = ['未标记', '已打包', '缺失', '需清洗', '已归还'];
+
+  function getCostumeAlert(costumeId) {
+    const costume = costumes.find((c) => c.id === costumeId);
+    if (!costume) return null;
+    const alerts = [];
+    if (costume.status === '借出') {
+      const isOverdue = costume.due && new Date(costume.due) < new Date(iso(0));
+      if (isOverdue) {
+        alerts.push({ type: 'overdue', label: `逾期未还：${costume.borrower}，应还${costume.due}` });
+      } else {
+        alerts.push({ type: 'borrowed', label: `已借出：${costume.borrower}，至${costume.due}` });
+      }
+    }
+    const activeWO = getActiveWorkOrder(costumeId);
+    if (activeWO) {
+      alerts.push({ type: 'workorder', label: `${activeWO.type}中：${activeWO.status}，负责人${activeWO.assignee}` });
+    }
+    return alerts.length > 0 ? alerts : null;
+  }
+
+  function openCreatePackingList() {
+    creatingPackingList = true;
+    editingPackingListId = null;
+    packingListForm = {
+      play: '',
+      performanceDate: iso(1),
+      name: '',
+      note: '',
+      items: []
+    };
+    packingAddCostumeQuery = '';
+    packingAddCostumePlayFilter = '全部剧目';
+    showPackingListModal = true;
+  }
+
+  function openEditPackingList(id) {
+    const list = packingLists.find((pl) => pl.id === id);
+    if (!list) return;
+    creatingPackingList = false;
+    editingPackingListId = id;
+    packingListForm = {
+      play: list.play,
+      performanceDate: list.performanceDate,
+      name: list.name,
+      note: list.note,
+      items: [...list.items]
+    };
+    packingAddCostumeQuery = '';
+    packingAddCostumePlayFilter = list.play || '全部剧目';
+    showPackingListModal = true;
+  }
+
+  function closePackingListModal() {
+    showPackingListModal = false;
+    creatingPackingList = false;
+    editingPackingListId = null;
+  }
+
+  function addCostumeToPackingList(costume) {
+    if (packingListForm.items.find((item) => item.costumeId === costume.id)) return;
+    packingListForm.items = [
+      ...packingListForm.items,
+      {
+        costumeId: costume.id,
+        costumeName: costume.name,
+        size: costume.size,
+        location: costume.location,
+        status: '未标记',
+        note: ''
+      }
+    ];
+  }
+
+  function removeCostumeFromPackingList(costumeId) {
+    packingListForm.items = packingListForm.items.filter((item) => item.costumeId !== costumeId);
+  }
+
+  function updatePackingItemStatus(listId, costumeId, status) {
+    packingLists = packingLists.map((pl) => {
+      if (pl.id !== listId) return pl;
+      return {
+        ...pl,
+        items: pl.items.map((item) => item.costumeId === costumeId ? { ...item, status } : item)
+      };
+    });
+    persistPackingLists();
+  }
+
+  function updatePackingItemNote(listId, costumeId, note) {
+    packingLists = packingLists.map((pl) => {
+      if (pl.id !== listId) return pl;
+      return {
+        ...pl,
+        items: pl.items.map((item) => item.costumeId === costumeId ? { ...item, note } : item)
+      };
+    });
+    persistPackingLists();
+  }
+
+  function savePackingList() {
+    if (!packingListForm.play.trim() || !packingListForm.performanceDate) return;
+
+    if (creatingPackingList) {
+      const newList = {
+        id: crypto.randomUUID(),
+        play: packingListForm.play.trim(),
+        performanceDate: packingListForm.performanceDate,
+        name: packingListForm.name.trim() || `${packingListForm.play} - ${packingListForm.performanceDate}`,
+        note: packingListForm.note.trim(),
+        createdAt: new Date().toISOString(),
+        items: packingListForm.items
+      };
+      packingLists = [newList, ...packingLists];
+      persistPackingLists();
+      addRecord('装箱单创建', { name: newList.name, play: newList.play }, '系统', `创建装箱单「${newList.name}」，剧目：${newList.play}，演出日期：${newList.performanceDate}，共${newList.items.length}件服装`);
+    } else if (editingPackingListId) {
+      packingLists = packingLists.map((pl) => pl.id === editingPackingListId ? {
+        ...pl,
+        play: packingListForm.play.trim(),
+        performanceDate: packingListForm.performanceDate,
+        name: packingListForm.name.trim() || `${packingListForm.play} - ${packingListForm.performanceDate}`,
+        note: packingListForm.note.trim(),
+        items: packingListForm.items
+      } : pl);
+      persistPackingLists();
+    }
+    closePackingListModal();
+  }
+
+  function deletePackingList(id) {
+    const list = packingLists.find((pl) => pl.id === id);
+    if (!list) return;
+    if (!confirm(`确定要删除装箱单「${list.name}」吗？此操作不可撤销。`)) return;
+    packingLists = packingLists.filter((pl) => pl.id !== id);
+    persistPackingLists();
+    if (selectedPackingListId === id) {
+      selectedPackingListId = null;
+      showPackingListDetail = false;
+    }
+    addRecord('装箱单删除', { name: list.name, play: list.play }, '系统', `删除装箱单「${list.name}」`);
+  }
+
+  function openPackingListDetail(id) {
+    selectedPackingListId = id;
+    showPackingListDetail = true;
+    isPrintingPackingList = false;
+  }
+
+  function closePackingListDetail() {
+    showPackingListDetail = false;
+    selectedPackingListId = null;
+    isPrintingPackingList = false;
+  }
+
+  function printPackingList() {
+    isPrintingPackingList = true;
+    setTimeout(() => {
+      window.print();
+      isPrintingPackingList = false;
+    }, 100);
+  }
+
+  function getPackingStatusClass(status) {
+    if (status === '已打包') return 'packing-status-packed';
+    if (status === '缺失') return 'packing-status-missing';
+    if (status === '需清洗') return 'packing-status-clean';
+    if (status === '已归还') return 'packing-status-returned';
+    return 'packing-status-pending';
   }
 
   const sizeOrder = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
@@ -640,6 +852,32 @@
   $: selectedActor = actors.find((a) => a.id === selectedActorId);
   $: lendingActor = actors.find((a) => a.id === lendingActorId);
   $: lendingSizeMatch = lendingCostume && lendingActor ? matchSize(lendingCostume.size, lendingActor.size) : null;
+  $: filteredPackingLists = packingLists.filter((pl) => {
+    const text = `${pl.name}${pl.play}${pl.performanceDate}`;
+    const matchesQuery = text.includes(packingListQuery.trim());
+    const today = iso(0);
+    let matchesFilter = true;
+    if (packingListFilter === '即将演出') matchesFilter = pl.performanceDate >= today;
+    else if (packingListFilter === '已过期') matchesFilter = pl.performanceDate < today;
+    return matchesQuery && matchesFilter;
+  }).sort((a, b) => new Date(a.performanceDate) - new Date(b.performanceDate));
+  $: packingAddAvailableCostumes = costumes.filter((c) => {
+    if (packingAddCostumePlayFilter !== '全部剧目' && c.play !== packingAddCostumePlayFilter) return false;
+    const text = `${c.name}${c.size}${c.play}${c.location}${c.borrower}`;
+    if (!text.includes(packingAddCostumeQuery.trim())) return false;
+    if (packingListForm.items.find((item) => item.costumeId === c.id)) return false;
+    return true;
+  });
+  $: selectedPackingList = packingLists.find((pl) => pl.id === selectedPackingListId);
+  $: packingPlays = ['全部剧目', ...new Set(costumes.map((item) => item.play).filter(Boolean))];
+  $: packingSummary = selectedPackingList ? {
+    total: selectedPackingList.items.length,
+    packed: selectedPackingList.items.filter((item) => item.status === '已打包').length,
+    missing: selectedPackingList.items.filter((item) => item.status === '缺失').length,
+    clean: selectedPackingList.items.filter((item) => item.status === '需清洗').length,
+    returned: selectedPackingList.items.filter((item) => item.status === '已归还').length,
+    pending: selectedPackingList.items.filter((item) => item.status === '未标记').length
+  } : null;
 
   function saveCostume() {
     if (!form.name.trim() || !form.play.trim()) return;
@@ -837,6 +1075,10 @@
         cancelDeleteActor();
       } else if (selectedActorId) {
         closeActorDetail();
+      } else if (showPackingListModal) {
+        closePackingListModal();
+      } else if (showPackingListDetail) {
+        closePackingListDetail();
       } else if (selectedId) {
         closeDetail();
       }
@@ -855,6 +1097,7 @@
       <b><Clock size={18} />{borrowedCount}件借出</b>
       <b><CalendarDays size={18} />{activeReservationCount}个预约</b>
       <b><Archive size={18} />{cleanWaitCount}件待清洗</b>
+      <b><Package size={18} />{packingLists.length}个装箱单</b>
       <b class:danger={overdueCount > 0}><AlertTriangle size={18} />{overdueCount}项逾期</b>
     </div>
   </header>
@@ -1271,6 +1514,10 @@
               <Plus size={14} />
             {:else if record.type === '工单更新'}
               <Wrench size={14} />
+            {:else if record.type === '装箱单创建'}
+              <Package size={14} />
+            {:else if record.type === '装箱单删除'}
+              <Trash2 size={14} />
             {/if}
             {record.type}
           </div>
@@ -1292,6 +1539,85 @@
           <List size={32} />
           <p>暂无记录</p>
           <span>进行操作后记录将显示在这里</span>
+        </div>
+      {/if}
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="record-header">
+      <h2><Package size={18} />演出装箱清单</h2>
+      <div style="display: flex; gap: 10px; align-items: center;">
+        <span class="record-count">共 {filteredPackingLists.length} 个装箱单</span>
+        <button type="button" class="small-btn" on:click={openCreatePackingList}>
+          <Plus size={14} />新建装箱单
+        </button>
+      </div>
+    </div>
+    <div class="record-toolbar">
+      <label><Search size={16} /><input bind:value={packingListQuery} placeholder="搜索装箱单名称/剧目/日期" /></label>
+      <select bind:value={packingListFilter}>
+        <option>全部</option>
+        <option>即将演出</option>
+        <option>已过期</option>
+      </select>
+    </div>
+    <div class="record-list">
+      {#each filteredPackingLists as pl}
+        {@const isPast = pl.performanceDate < iso(0)}
+        {@const packedCount = pl.items.filter((item) => item.status === '已打包').length}
+        {@const missingCount = pl.items.filter((item) => item.status === '缺失').length}
+        {@const cleanCount = pl.items.filter((item) => item.status === '需清洗').length}
+        {@const returnedCount = pl.items.filter((item) => item.status === '已归还').length}
+        {@const hasAlerts = pl.items.some((item) => getCostumeAlert(item.costumeId))}
+        <div class="record-item packing-list-item" class:record-overdue={isPast}>
+          <div class="record-type-badge record-type-预约">
+            <Package size={14} />
+            {isPast ? '已完成' : '待装箱'}
+          </div>
+          <div class="record-content">
+            <div class="record-title-row">
+              <strong class="record-name">{pl.name}</strong>
+              <span class="record-play-tag">{pl.play}</span>
+              <span class="record-play-tag reservation-date-tag"><Calendar size={12} />演出：{pl.performanceDate}</span>
+              {#if hasAlerts}
+                <span class="record-play-tag" style="background: #fdecea; color: #8a2d2d;">
+                  <AlertOctagon size={12} />有异常
+                </span>
+              {/if}
+            </div>
+            <p class="record-summary">
+              共 {pl.items.length} 件服装
+              {#if pl.items.length > 0}
+                · 已打包 {packedCount} 件
+                {#if missingCount > 0} · 缺失 {missingCount} 件{/if}
+                {#if cleanCount > 0} · 需清洗 {cleanCount} 件{/if}
+                {#if returnedCount > 0} · 已归还 {returnedCount} 件{/if}
+              {/if}
+              {#if pl.note} · 备注：{pl.note}{/if}
+            </p>
+            <div class="record-footer">
+              <span class="record-operator">创建时间：{formatTime(pl.createdAt)}</span>
+              <div style="display: flex; gap: 6px;">
+                <button type="button" class="small-btn" on:click={() => openPackingListDetail(pl.id)}>
+                  <Eye size={12} />查看/打印
+                </button>
+                <button type="button" class="secondary small-btn" on:click={() => openEditPackingList(pl.id)}>
+                  <Save size={12} />编辑
+                </button>
+                <button type="button" class="danger-outline small-btn" on:click={() => deletePackingList(pl.id)}>
+                  <Trash2 size={12} />删除
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      {/each}
+      {#if filteredPackingLists.length === 0}
+        <div class="record-empty">
+          <Package size={32} />
+          <p>暂无装箱单</p>
+          <span>点击「新建装箱单」为演出准备服装清单</span>
         </div>
       {/if}
     </div>
@@ -1829,6 +2155,327 @@
       </div>
     </div>
   {/if}
+
+  {#if showPackingListModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay" role="presentation" on:click={closePackingListModal}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal modal-wide packing-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="packing-modal-title"
+        on:click|stopPropagation
+        on:keydown={handleModalKeydown}
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h2 id="packing-modal-title">
+            {creatingPackingList ? '新建装箱单' : '编辑装箱单'}
+          </h2>
+          <button type="button" class="icon-btn" on:click={closePackingListModal} aria-label="关闭"><X size={20} /></button>
+        </div>
+        <form class="detail-form" on:submit|preventDefault={savePackingList}>
+          <div class="split">
+            <label>
+              <span>所属剧目</span>
+              <input bind:value={packingListForm.play} placeholder="请输入剧目名称" required />
+            </label>
+            <label>
+              <span>演出日期</span>
+              <input type="date" bind:value={packingListForm.performanceDate} required />
+            </label>
+          </div>
+          <label>
+            <span>装箱单名称（可选）</span>
+            <input bind:value={packingListForm.name} placeholder="留空将自动生成" />
+          </label>
+          <label>
+            <span>备注</span>
+            <input bind:value={packingListForm.note} placeholder="选填，如特殊要求等" />
+          </label>
+
+          <div class="packing-section">
+            <div class="packing-section-title">
+              <strong>已添加服装（{packingListForm.items.length}件）</strong>
+            </div>
+            {#if packingListForm.items.length === 0}
+              <div class="record-empty" style="padding: 20px;">
+                <Box size={24} />
+                <p>还未添加服装</p>
+                <span>从下方列表中选择服装加入装箱单</span>
+              </div>
+            {:else}
+              <div class="packing-items-list">
+                {#each packingListForm.items as item}
+                  {@const alerts = getCostumeAlert(item.costumeId)}
+                  <div class="packing-item-row" class:packing-item-has-alert={alerts}>
+                    <div class="packing-item-info">
+                      <strong>{item.costumeName}</strong>
+                      <span>{item.size || '未填尺码'} · {item.location || '未填位置'}</span>
+                      {#if alerts}
+                        <div class="packing-item-alerts">
+                          {#each alerts as alert}
+                            <span class="packing-alert-tag packing-alert-{alert.type}">
+                              {#if alert.type === 'overdue'}<AlertOctagon size={11} />
+                              {:else if alert.type === 'borrowed'}<Clock size={11} />
+                              {:else}<Wrench size={11} />{/if}
+                              {alert.label}
+                            </span>
+                          {/each}
+                        </div>
+                      {/if}
+                    </div>
+                    <button type="button" class="danger-outline small-btn" on:click={() => removeCostumeFromPackingList(item.costumeId)}>
+                      <X size={12} />移除
+                    </button>
+                  </div>
+                {/each}
+              </div>
+            {/if}
+          </div>
+
+          <div class="packing-section">
+            <div class="packing-section-title">
+              <strong>从服装档案中选择</strong>
+            </div>
+            <div class="record-toolbar" style="margin-bottom: 10px;">
+              <label><Search size={16} /><input bind:value={packingAddCostumeQuery} placeholder="搜索服装/尺码/位置" /></label>
+              <select bind:value={packingAddCostumePlayFilter}>
+                {#each packingPlays as play}
+                  <option>{play}</option>
+                {/each}
+              </select>
+            </div>
+            <div class="packing-costume-list">
+              {#each packingAddAvailableCostumes as costume}
+                {@const alerts = getCostumeAlert(costume.id)}
+                <button
+                  type="button"
+                  class="packing-costume-card"
+                  class:packing-item-has-alert={alerts}
+                  on:click={() => addCostumeToPackingList(costume)}
+                >
+                  <div class="packing-costume-main">
+                    <strong>{costume.name}</strong>
+                    <span>{costume.play} · {costume.size || '未填尺码'}</span>
+                    <span class="packing-costume-loc">{costume.location || '未填位置'}</span>
+                  </div>
+                  <div class="packing-costume-side">
+                    {#if costume.status === '借出'}
+                      <span class="record-play-tag" style="background: #fff0e6; color: #8a4a1a;">
+                        <Clock size={11} />{costume.status}
+                      </span>
+                    {/if}
+                    {#if alerts}
+                      {#each alerts as alert}
+                        <span class="packing-alert-tag packing-alert-{alert.type}">
+                          {#if alert.type === 'overdue'}<AlertOctagon size={11} />
+                          {:else if alert.type === 'borrowed'}<Clock size={11} />
+                          {:else}<Wrench size={11} />{/if}
+                        </span>
+                      {/each}
+                    {/if}
+                    <Plus size={16} class="packing-add-icon" />
+                  </div>
+                </button>
+              {/each}
+              {#if packingAddAvailableCostumes.length === 0}
+                <div class="record-empty" style="padding: 20px;">
+                  <Shirt size={24} />
+                  <p>没有可添加的服装</p>
+                  <span>尝试调整搜索条件或剧目筛选</span>
+                </div>
+              {/if}
+            </div>
+          </div>
+
+          <div class="modal-actions">
+            <button type="button" class="secondary" on:click={closePackingListModal}>取消</button>
+            <button type="submit" disabled={!packingListForm.play.trim() || !packingListForm.performanceDate}>
+              <Save size={16} />{creatingPackingList ? '创建装箱单' : '保存修改'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  {/if}
+
+  {#if showPackingListDetail && selectedPackingList}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay packing-detail-overlay" class:printing={isPrintingPackingList} role="presentation" on:click={!isPrintingPackingList && closePackingListDetail}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal packing-detail-modal"
+        class:printing={isPrintingPackingList}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="packing-detail-title"
+        on:click|stopPropagation
+        on:keydown={handleModalKeydown}
+        tabindex="-1"
+      >
+        <div class="packing-detail-header">
+          <div>
+            <h2 id="packing-detail-title"><Package size={20} />{selectedPackingList.name}</h2>
+            <div class="packing-detail-meta">
+              <span class="record-play-tag"><Calendar size={12} />剧目：{selectedPackingList.play}</span>
+              <span class="record-play-tag reservation-date-tag"><Calendar size={12} />演出日期：{selectedPackingList.performanceDate}</span>
+              {#if selectedPackingList.note}
+                <span class="record-play-tag">备注：{selectedPackingList.note}</span>
+              {/if}
+            </div>
+          </div>
+          {#if !isPrintingPackingList}
+            <div class="packing-detail-actions">
+              <button type="button" class="secondary" on:click={printPackingList}>
+                <Printer size={16} />打印
+              </button>
+              <button type="button" class="icon-btn" on:click={closePackingListDetail} aria-label="关闭"><X size={20} /></button>
+            </div>
+          {/if}
+        </div>
+
+        <div class="packing-detail-body">
+          <div class="packing-detail-summary">
+            <div class="packing-summary-card">
+              <div class="packing-summary-num">{packingSummary.total}</div>
+              <div class="packing-summary-label">总计</div>
+            </div>
+            <div class="packing-summary-card packing-status-packed">
+              <div class="packing-summary-num">{packingSummary.packed}</div>
+              <div class="packing-summary-label">已打包</div>
+            </div>
+            <div class="packing-summary-card packing-status-missing">
+              <div class="packing-summary-num">{packingSummary.missing}</div>
+              <div class="packing-summary-label">缺失</div>
+            </div>
+            <div class="packing-summary-card packing-status-clean">
+              <div class="packing-summary-num">{packingSummary.clean}</div>
+              <div class="packing-summary-label">需清洗</div>
+            </div>
+            <div class="packing-summary-card packing-status-returned">
+              <div class="packing-summary-num">{packingSummary.returned}</div>
+              <div class="packing-summary-label">已归还</div>
+            </div>
+            <div class="packing-summary-card packing-status-pending">
+              <div class="packing-summary-num">{packingSummary.pending}</div>
+              <div class="packing-summary-label">未标记</div>
+            </div>
+          </div>
+
+          <div class="packing-detail-table-wrap">
+            <table class="packing-detail-table">
+              <thead>
+                <tr>
+                  <th style="width: 40px;">序号</th>
+                  <th>服装名称</th>
+                  <th>尺码</th>
+                  <th>存放位置</th>
+                  <th>状态</th>
+                  <th>提示</th>
+                  {#if !isPrintingPackingList}
+                    <th style="width: 200px;">操作</th>
+                  {/if}
+                </tr>
+              </thead>
+              <tbody>
+                {#each selectedPackingList.items as item, index}
+                  {@const alerts = getCostumeAlert(item.costumeId)}
+                  <tr class:packing-row-alert={alerts}>
+                    <td class="packing-cell-center">{index + 1}</td>
+                    <td><strong>{item.costumeName}</strong></td>
+                    <td>{item.size || '-'}</td>
+                    <td>{item.location || '-'}</td>
+                    <td>
+                      <span class="packing-status-badge {getPackingStatusClass(item.status)}">
+                        {#if item.status === '已打包'}<CheckCircle size={12} />
+                        {:else if item.status === '缺失'}<XCircle size={12} />
+                        {:else if item.status === '需清洗'}<Droplets size={12} />
+                        {:else if item.status === '已归还'}<Undo2 size={12} />
+                        {:else}<Clock size={12} />{/if}
+                        {item.status}
+                      </span>
+                    </td>
+                    <td>
+                      {#if alerts}
+                        <div class="packing-alerts-inline">
+                          {#each alerts as alert}
+                            <span class="packing-alert-tag packing-alert-{alert.type}">
+                              {#if alert.type === 'overdue'}<AlertOctagon size={11} />
+                              {:else if alert.type === 'borrowed'}<Clock size={11} />
+                              {:else}<Wrench size={11} />{/if}
+                              {alert.label}
+                            </span>
+                          {/each}
+                        </div>
+                      {:else}-{/if}
+                    </td>
+                    {#if !isPrintingPackingList}
+                      <td>
+                        <div class="packing-status-actions">
+                          <select
+                            value={item.status}
+                            on:change={(e) => updatePackingItemStatus(selectedPackingList.id, item.costumeId, e.target.value)}
+                            class="small-select"
+                          >
+                            {#each packingItemStatuses as status}
+                              <option>{status}</option>
+                            {/each}
+                          </select>
+                        </div>
+                      </td>
+                    {/if}
+                  </tr>
+                {/each}
+                {#if selectedPackingList.items.length === 0}
+                  <tr>
+                    <td colspan={isPrintingPackingList ? 6 : 7} style="text-align: center; padding: 30px; color: #8a7665;">
+                      <Package size={28} />
+                      <p style="margin: 8px 0 0;">装箱单中暂无服装</p>
+                    </td>
+                  </tr>
+                {/if}
+              </tbody>
+            </table>
+          </div>
+
+          {#if !isPrintingPackingList && selectedPackingList.items.length > 0}
+            <div class="packing-detail-footer">
+              <div class="packing-signature">
+                <div class="packing-signature-item">
+                  <span>装箱人签字：</span>
+                  <span class="packing-signature-line"></span>
+                </div>
+                <div class="packing-signature-item">
+                  <span>日期：</span>
+                  <span class="packing-signature-line"></span>
+                </div>
+              </div>
+            </div>
+          {/if}
+          {#if isPrintingPackingList}
+            <div class="packing-detail-footer packing-print-footer">
+              <div class="packing-signature">
+                <div class="packing-signature-item">
+                  <span>装箱人签字：</span>
+                  <span class="packing-signature-line"></span>
+                </div>
+                <div class="packing-signature-item">
+                  <span>日期：</span>
+                  <span class="packing-signature-line"></span>
+                </div>
+                <div class="packing-signature-item">
+                  <span>接收人签字：</span>
+                  <span class="packing-signature-line"></span>
+                </div>
+              </div>
+            </div>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -1944,6 +2591,8 @@
   .record-type-工单创建 { background: #e6f0f6; color: #1a5a8a; }
   .record-type-工单更新 { background: #fff4e6; color: #8a5a1a; }
   .record-type-维修 { background: #f6e6e6; color: #8a1a2d; }
+  .record-type-装箱单创建 { background: #e6f0e6; color: #2d5a2d; }
+  .record-type-装箱单删除 { background: #f6e6e6; color: #8a2d2d; }
   .item-in-workorder { border-color: #c9a67e; background: #fff8f0; }
   .workorder-info { display: inline-flex; align-items: center; gap: 4px; margin: 4px 0 0; padding: 4px 10px; background: #fff4e6; color: #8a5a1a; border-radius: 6px; font-size: 12px; }
   .record-content { flex: 1; min-width: 0; }
@@ -2002,5 +2651,93 @@
   .actor-match-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px dashed #e4d8cc; }
   .actor-match-row:last-child { border-bottom: none; }
   .actor-match-costume { font-size: 13px; color: #3b2f26; }
-  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar, .record-toolbar, .actor-layout { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } .record-item { flex-direction: column; } .record-footer { flex-direction: column; align-items: flex-start; } .stats-grid { grid-template-columns: repeat(2, 1fr); } .stat-number { font-size: 22px; } .stat-card { padding: 12px; gap: 10px; } .stat-icon { width: 40px; height: 40px; } .actor-list { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar, .record-toolbar, .actor-layout { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } .record-item { flex-direction: column; } .record-footer { flex-direction: column; align-items: flex-start; } .stats-grid { grid-template-columns: repeat(2, 1fr); } .stat-number { font-size: 22px; } .stat-card { padding: 12px; gap: 10px; } .stat-icon { width: 40px; height: 40px; } .actor-list { grid-template-columns: 1fr; } .packing-detail-summary { grid-template-columns: repeat(3, 1fr) !important; } .packing-modal { max-width: 100% !important; } .packing-costume-list { grid-template-columns: 1fr !important; } }
+
+  .packing-list-item { align-items: center; }
+  .packing-modal { max-width: 780px !important; }
+  .packing-section { margin-top: 10px; padding: 14px; background: #faf6f2; border-radius: 8px; border: 1px solid #e4d8cc; display: flex; flex-direction: column; gap: 10px; }
+  .packing-section-title { font-size: 14px; color: #3b2f26; font-weight: 600; display: flex; align-items: center; justify-content: space-between; }
+  .packing-items-list { display: flex; flex-direction: column; gap: 8px; max-height: 220px; overflow-y: auto; }
+  .packing-item-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 10px 12px; background: #fff; border: 1px solid #e4d8cc; border-radius: 8px; }
+  .packing-item-row.packing-item-has-alert { border-color: #e0b8b0; background: #fff8f5; }
+  .packing-item-info { display: flex; flex-direction: column; gap: 3px; min-width: 0; flex: 1; }
+  .packing-item-info strong { font-size: 14px; color: #26211c; }
+  .packing-item-info span { font-size: 12px; color: #6b5a4d; }
+  .packing-item-alerts { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+  .packing-alert-tag { display: inline-flex; align-items: center; gap: 3px; padding: 2px 8px; border-radius: 4px; font-size: 11px; font-weight: 500; }
+  .packing-alert-borrowed { background: #fff0e6; color: #8a4a1a; }
+  .packing-alert-overdue { background: #fdecea; color: #8a2d2d; }
+  .packing-alert-workorder { background: #fff4e6; color: #8a5a1a; }
+  .packing-costume-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 8px; max-height: 280px; overflow-y: auto; padding-right: 4px; }
+  .packing-costume-card { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; padding: 10px 12px; background: #fff; border: 1px solid #e4d8cc; border-radius: 8px; cursor: pointer; text-align: left; transition: transform .15s ease, box-shadow .15s ease, border-color .15s ease; }
+  .packing-costume-card:hover { transform: translateY(-2px); box-shadow: 0 4px 12px rgb(62 42 24 / .1); border-color: #c9a67e; }
+  .packing-costume-card.packing-item-has-alert { border-color: #e0b8b0; background: #fff8f5; }
+  .packing-costume-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+  .packing-costume-main strong { font-size: 13px; color: #26211c; }
+  .packing-costume-main span { font-size: 11px; color: #6b5a4d; }
+  .packing-costume-loc { color: #8a7665 !important; }
+  .packing-costume-side { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+  .packing-add-icon { color: #603d2d; margin-top: 4px; }
+  .packing-detail-overlay { z-index: 150; }
+  .packing-detail-modal { max-width: 960px !important; max-height: 92vh; }
+  .packing-detail-overlay.printing { background: #fff !important; padding: 0; }
+  .packing-detail-modal.printing { box-shadow: none !important; border-radius: 0 !important; max-width: 100% !important; max-height: 100% !important; width: 100% !important; height: 100% !important; overflow: visible !important; }
+  .packing-detail-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; padding: 18px 24px; border-bottom: 1px solid #e4d8cc; background: #fffaf5; border-radius: 12px 12px 0 0; position: sticky; top: 0; z-index: 5; }
+  .packing-detail-modal.printing .packing-detail-header { border-radius: 0; background: #fff; padding: 0 0 16px; }
+  .packing-detail-header h2 { display: inline-flex; align-items: center; gap: 8px; margin: 0 0 6px; font-size: 20px; }
+  .packing-detail-meta { display: flex; flex-wrap: wrap; gap: 6px; }
+  .packing-detail-actions { display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+  .packing-detail-body { padding: 20px 24px 24px; display: flex; flex-direction: column; gap: 16px; }
+  .packing-detail-modal.printing .packing-detail-body { padding: 0; }
+  .packing-detail-summary { display: grid; grid-template-columns: repeat(6, 1fr); gap: 10px; }
+  .packing-summary-card { padding: 12px; border-radius: 8px; background: #faf6f2; border: 1px solid #e4d8cc; text-align: center; }
+  .packing-summary-num { font-size: 26px; font-weight: 700; color: #26211c; line-height: 1.1; }
+  .packing-summary-label { font-size: 12px; color: #6b5a4d; margin-top: 4px; }
+  .packing-summary-card.packing-status-packed { background: #eef6ee; border-color: #b8d8b8; }
+  .packing-summary-card.packing-status-packed .packing-summary-num { color: #2d5a2d; }
+  .packing-summary-card.packing-status-missing { background: #fdecea; border-color: #e0b8b0; }
+  .packing-summary-card.packing-status-missing .packing-summary-num { color: #8a2d2d; }
+  .packing-summary-card.packing-status-clean { background: #e6eef6; border-color: #b8c8e0; }
+  .packing-summary-card.packing-status-clean .packing-summary-num { color: #1a4a8a; }
+  .packing-summary-card.packing-status-returned { background: #f0e6f6; border-color: #d4b8e0; }
+  .packing-summary-card.packing-status-returned .packing-summary-num { color: #5a1a8a; }
+  .packing-summary-card.packing-status-pending { background: #f6efe7; border-color: #e4d8cc; }
+  .packing-summary-card.packing-status-pending .packing-summary-num { color: #6b5a4d; }
+  .packing-detail-table-wrap { background: #fff; border: 1px solid #e4d8cc; border-radius: 8px; overflow: hidden; }
+  .packing-detail-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .packing-detail-table th { background: #faf6f2; padding: 10px 12px; text-align: left; font-weight: 600; color: #3b2f26; border-bottom: 1px solid #e4d8cc; font-size: 12px; }
+  .packing-detail-table td { padding: 10px 12px; border-bottom: 1px solid #f0e6dc; color: #3b2f26; vertical-align: middle; }
+  .packing-detail-table tr:last-child td { border-bottom: none; }
+  .packing-detail-table tr.packing-row-alert { background: #fff8f5; }
+  .packing-detail-table tr.packing-row-alert td { border-bottom-color: #f5e0d8; }
+  .packing-cell-center { text-align: center !important; color: #8a7665 !important; font-size: 12px; }
+  .packing-status-badge { display: inline-flex; align-items: center; gap: 5px; padding: 4px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; }
+  .packing-status-badge.packing-status-packed { background: #e6f0e6; color: #2d5a2d; }
+  .packing-status-badge.packing-status-missing { background: #f6e6e6; color: #8a2d2d; }
+  .packing-status-badge.packing-status-clean { background: #e6eef6; color: #1a4a8a; }
+  .packing-status-badge.packing-status-returned { background: #f0e6f6; color: #5a1a8a; }
+  .packing-status-badge.packing-status-pending { background: #f6efe7; color: #6b5a4d; }
+  .packing-alerts-inline { display: flex; flex-direction: column; gap: 3px; }
+  .packing-status-actions { display: flex; gap: 6px; }
+  .small-select { width: auto; padding: 6px 8px; font-size: 12px; min-height: auto; }
+  .packing-detail-footer { padding-top: 16px; border-top: 1px dashed #e4d8cc; }
+  .packing-signature { display: flex; gap: 30px; flex-wrap: wrap; justify-content: flex-end; }
+  .packing-signature-item { display: flex; align-items: center; gap: 8px; font-size: 13px; color: #6b5a4d; }
+  .packing-signature-line { display: inline-block; min-width: 140px; border-bottom: 1px solid #3b2f26; height: 20px; }
+  .packing-print-footer { margin-top: 40px; }
+  .packing-print-footer .packing-signature { gap: 40px; justify-content: space-between; }
+
+  @media print {
+    :global(body) { background: #fff !important; }
+    main { padding: 0 !important; }
+    .hero, .workorder-stats, .panel, section:not(.packing-detail-overlay), .modal-overlay:not(.printing) { display: none !important; }
+    .packing-detail-overlay.printing { position: static !important; background: #fff !important; padding: 20px !important; display: block !important; }
+    .packing-detail-modal.printing { position: static !important; max-width: 100% !important; max-height: none !important; box-shadow: none !important; border: none !important; padding: 0 !important; display: block !important; overflow: visible !important; }
+    .packing-detail-header, .packing-detail-body, .packing-detail-footer { border: none !important; background: #fff !important; }
+    .packing-status-actions, .packing-detail-actions { display: none !important; }
+    .packing-detail-table { font-size: 11px; }
+    .packing-detail-table th, .packing-detail-table td { padding: 6px 8px; }
+    .packing-summary-card { padding: 8px; }
+    .packing-summary-num { font-size: 20px; }
+  }
 </style>
