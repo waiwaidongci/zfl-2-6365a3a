@@ -74,12 +74,19 @@
   function checkConflict(costumeId, date, excludeId = null) {
     const costume = costumes.find((c) => c.id === costumeId);
     const conflicts = [];
-    if (costume && costume.status === '借出' && costume.due) {
-      const borrowStart = new Date(iso(0));
-      const borrowDue = new Date(costume.due);
+    if (costume && costume.status === '借出') {
+      const today = new Date(iso(0));
       const targetDate = new Date(date);
-      if (targetDate >= borrowStart && targetDate <= borrowDue) {
-        conflicts.push({ type: '借出', detail: `${costume.borrower}借用至${costume.due}` });
+      if (costume.due) {
+        const borrowDue = new Date(costume.due);
+        const isOverdue = borrowDue < today;
+        if (isOverdue) {
+          conflicts.push({ type: '借出', detail: `逾期未还：${costume.borrower}，应还${costume.due}，归还时间不确定` });
+        } else if (targetDate >= today && targetDate <= borrowDue) {
+          conflicts.push({ type: '借出', detail: `${costume.borrower}借用至${costume.due}` });
+        }
+      } else {
+        conflicts.push({ type: '借出', detail: `${costume.borrower}借用中，归还时间不确定` });
       }
     }
     reservations.forEach((r) => {
