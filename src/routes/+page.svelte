@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal, Package, Printer, Box, AlertOctagon, Database, RefreshCw, HardDrive, LayoutGrid, ClipboardList } from 'lucide-svelte';
+  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal, Package, Printer, Box, AlertOctagon, Database, RefreshCw, HardDrive, LayoutGrid, ClipboardList, ArrowRightLeft } from 'lucide-svelte';
   import {
     initializeDatabase,
     getAll,
@@ -15,12 +15,23 @@
     getDBStats,
     isLegacyDataPresent,
     removeLegacyKeys,
-    TABLES
+    parseBackupFile,
+    getFullDB,
+    saveFullDB,
+    updateLastMergeAt,
+    TABLES,
+    TABLE_LABELS
   } from '$lib/database.js';
   import ScheduleKanban from '$lib/ScheduleKanban.svelte';
   import { getAllSchedules } from '$lib/scheduleStore.js';
   import InventoryPanel from '$lib/InventoryPanel.svelte';
   import InventoryDetail from '$lib/InventoryDetail.svelte';
+  import MergePanel from '$lib/MergePanel.svelte';
+  import {
+    computeFullDiff,
+    createDefaultDecisions,
+    applyMerge
+  } from '$lib/mergeUtils.js';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -145,6 +156,14 @@
   let restoreFileContent = '';
   let restoreError = '';
   let dbMigrationNotice = '';
+
+  let showMergePanel = false;
+  let mergeFileName = '';
+  let mergeImportDB = null;
+  let mergeDiffResult = null;
+  let mergeDecisions = {};
+  let mergeError = '';
+  let mergeSuccess = '';
 
   onMount(() => {
     const hadLegacy = isLegacyDataPresent();
@@ -327,6 +346,73 @@
     restorePreview = null;
     restoreFileContent = '';
     restoreError = '';
+  }
+
+  async function handleMergeFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    mergeError = '';
+    mergeSuccess = '';
+    mergeFileName = file.name;
+    const content = await readBackupFile(file);
+    if (!content) {
+      mergeError = '无法读取文件内容';
+      e.target.value = '';
+      return;
+    }
+    const parsed = parseBackupFile(content);
+    if (!parsed.ok) {
+      mergeError = parsed.error;
+      e.target.value = '';
+      return;
+    }
+    if (parsed.legacyFormat) {
+      mergeError = '旧版仅服装格式不支持合并导入，请使用「恢复数据（覆盖）」或导出新版完整备份后再合并。';
+      e.target.value = '';
+      return;
+    }
+    const currentDB = getFullDB();
+    mergeImportDB = parsed.db;
+    mergeDiffResult = computeFullDiff(currentDB, parsed.db);
+    mergeDecisions = createDefaultDecisions(mergeDiffResult);
+    showDataManager = false;
+    showMergePanel = true;
+    e.target.value = '';
+  }
+
+  function closeMergePanel() {
+    showMergePanel = false;
+    mergeImportDB = null;
+    mergeDiffResult = null;
+    mergeDecisions = {};
+    mergeFileName = '';
+    mergeError = '';
+  }
+
+  function handleConfirmMerge(finalDecisions) {
+    if (!mergeDiffResult || !mergeImportDB) return;
+    if (!confirm('确认执行合并？合并将更新当前数据库，建议先导出完整备份。')) return;
+    try {
+      const currentDB = getFullDB();
+      const { db: mergedDB, costumeIdMap } = applyMerge(currentDB, mergeImportDB, mergeDiffResult, finalDecisions);
+      saveFullDB(mergedDB);
+      updateLastMergeAt();
+      const fresh = initializeDatabase();
+      costumes = fresh.tables[TABLES.costumes] || [];
+      records = fresh.tables[TABLES.records] || [];
+      reservations = fresh.tables[TABLES.reservations] || [];
+      workOrders = fresh.tables[TABLES.workOrders] || [];
+      actors = fresh.tables[TABLES.actors] || [];
+      packingLists = fresh.tables[TABLES.packingLists] || [];
+      schedules = fresh.tables[TABLES.schedules] || [];
+      inventoryTasks = fresh.tables[TABLES.inventoryTasks] || [];
+      refreshDBStats();
+      closeMergePanel();
+      mergeSuccess = `合并成功！${Object.keys(costumeIdMap).length > 0 ? `已同步修正 ${Object.keys(costumeIdMap).length} 个服装ID引用。` : ''}`;
+      setTimeout(() => { mergeSuccess = ''; }, 5000);
+    } catch (err) {
+      mergeError = `合并失败：${err.message}`;
+    }
   }
 
   function openDataManager() {
@@ -1249,7 +1335,9 @@
 
   function handleModalKeydown(e) {
     if (e.key === 'Escape') {
-      if (showDataManager) {
+      if (showMergePanel) {
+        closeMergePanel();
+      } else if (showDataManager) {
         closeDataManager();
       } else if (reservingId) {
         closeReserve();
@@ -2879,6 +2967,35 @@
             {/if}
           </div>
 
+          <div class="data-manager-section">
+            <h3><ArrowRightLeft size={16} />离线多设备合并导入</h3>
+            <p class="hint">
+              导入另一台电脑的<strong>完整备份</strong>，系统将比对差异，展示按表分类的变更预览（新增、相同、字段冲突、疑似删除、跨表引用风险）。
+              逐条确认后合并，不会简单覆盖；服装ID冲突时将自动修正预约、工单、装箱单中的引用。
+            </p>
+            {#if mergeSuccess}
+              <div class="import-summary success">
+                <CheckCircle size={16} />
+                <span>{mergeSuccess}</span>
+              </div>
+            {/if}
+            {#if mergeError}
+              <div class="import-summary warning">
+                <AlertTriangle size={16} />
+                <span>{mergeError}</span>
+              </div>
+            {/if}
+            {#if dbStats?.meta?.lastMergeAt}
+              <p class="hint" style="margin-top: 6px;">上次合并时间：{formatTime(dbStats.meta.lastMergeAt)} · 本设备ID：<code style="background:#f0e6d6;padding:1px 6px;border-radius:3px;font-size:12px;">{dbStats.meta.deviceId}</code></p>
+            {:else if dbStats?.meta?.deviceId}
+              <p class="hint" style="margin-top: 6px;">本设备ID：<code style="background:#f0e6d6;padding:1px 6px;border-radius:3px;font-size:12px;">{dbStats.meta.deviceId}</code></p>
+            {/if}
+            <label class="file-input-label">
+              <Upload size={16} />选择备份文件进行合并
+              <input type="file" accept=".json" on:change={handleMergeFile} hidden />
+            </label>
+          </div>
+
           {#if isLegacyDataPresent()}
             <div class="data-manager-section">
               <h3><AlertTriangle size={16} />旧版数据</h3>
@@ -2891,6 +3008,31 @@
             </div>
           {/if}
         </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if showMergePanel && mergeDiffResult}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay merge-overlay" role="presentation" on:click={closeMergePanel}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal merge-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="merge-title"
+        on:click|stopPropagation
+        on:keydown={handleModalKeydown}
+        tabindex="-1"
+      >
+        <MergePanel
+          diffResult={mergeDiffResult}
+          bind:decisions={mergeDecisions}
+          importFileName={mergeFileName}
+          importMeta={mergeImportDB?._meta}
+          onClose={closeMergePanel}
+          onConfirmMerge={handleConfirmMerge}
+        />
       </div>
     </div>
   {/if}
@@ -3270,5 +3412,15 @@
     flex-direction: column;
     gap: 12px;
     margin-top: 4px;
+  }
+
+  .merge-overlay { z-index: 200; }
+  .merge-modal {
+    width: min(1100px, 96vw);
+    max-height: 92vh;
+    padding: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
   }
 </style>

@@ -1,5 +1,5 @@
 const DB_KEY = 'zfl-2-database';
-const DB_VERSION = 4;
+const DB_VERSION = 5;
 
 const TABLES = {
   costumes: 'costumes',
@@ -13,6 +13,18 @@ const TABLES = {
   inventoryItems: 'inventoryItems'
 };
 
+const TABLE_LABELS = {
+  costumes: '服装档案',
+  records: '借还记录',
+  reservations: '排练预约',
+  workOrders: '清洗/维修工单',
+  actors: '演员尺码',
+  packingLists: '演出装箱单',
+  schedules: '演出排期',
+  inventoryTasks: '盘点任务',
+  inventoryItems: '盘点明细'
+};
+
 const LEGACY_KEYS = {
   [TABLES.costumes]: 'zfl-2-costumes',
   [TABLES.records]: 'zfl-2-records',
@@ -22,10 +34,20 @@ const LEGACY_KEYS = {
   [TABLES.packingLists]: 'zfl-2-packing-lists'
 };
 
+function generateDeviceId() {
+  return 'dev-' + crypto.randomUUID().slice(0, 8);
+}
+
 function createEmptyDatabase() {
   return {
     version: DB_VERSION,
     migratedAt: null,
+    _meta: {
+      deviceId: generateDeviceId(),
+      lastSyncedAt: null,
+      lastMergeAt: null,
+      createdAt: new Date().toISOString()
+    },
     tables: {
       [TABLES.costumes]: [],
       [TABLES.records]: [],
@@ -128,10 +150,23 @@ function migrate_v3_to_v4(db) {
   return db;
 }
 
+function migrate_v4_to_v5(db) {
+  if (!db._meta) {
+    db._meta = {
+      deviceId: generateDeviceId(),
+      lastSyncedAt: null,
+      lastMergeAt: null,
+      createdAt: db.migratedAt || new Date().toISOString()
+    };
+  }
+  return db;
+}
+
 const MIGRATIONS = {
   1: migrate_v1_to_v2,
   2: migrate_v2_to_v3,
-  3: migrate_v3_to_v4
+  3: migrate_v3_to_v4,
+  4: migrate_v4_to_v5
 };
 
 function runMigrations(db) {
@@ -341,6 +376,7 @@ export function getDBStats() {
   return {
     version: db.version,
     migratedAt: db.migratedAt,
+    meta: db._meta || null,
     tables: stats
   };
 }
@@ -355,4 +391,70 @@ export function removeLegacyKeys() {
   }
 }
 
-export { TABLES, DB_VERSION, DB_KEY };
+export function getFullDB() {
+  return deepClone(getDB());
+}
+
+export function saveFullDB(db) {
+  const toSave = deepClone(db);
+  if (!toSave._meta) {
+    toSave._meta = createEmptyDatabase()._meta;
+  }
+  return writeRawDB(toSave);
+}
+
+export function updateLastMergeAt() {
+  const db = getDB();
+  if (!db._meta) {
+    db._meta = createEmptyDatabase()._meta;
+  }
+  db._meta.lastMergeAt = new Date().toISOString();
+  writeRawDB(db);
+  return db._meta.lastMergeAt;
+}
+
+export function parseBackupFile(jsonString) {
+  let data;
+  try {
+    data = JSON.parse(jsonString);
+  } catch (e) {
+    return { ok: false, error: 'JSON 解析失败，请检查文件格式' };
+  }
+
+  if (!data || typeof data !== 'object') {
+    return { ok: false, error: '数据格式不正确' };
+  }
+
+  if (!data.tables || typeof data.tables !== 'object') {
+    if (Array.isArray(data)) {
+      const legacy = createEmptyDatabase();
+      legacy.tables[TABLES.costumes] = data;
+      return { ok: true, db: legacy, legacyFormat: true };
+    }
+    return { ok: false, error: '缺少 tables 字段，无法识别的数据格式' };
+  }
+
+  const cleaned = createEmptyDatabase();
+  for (const table of Object.values(TABLES)) {
+    if (Array.isArray(data.tables[table])) {
+      cleaned.tables[table] = data.tables[table];
+    }
+  }
+
+  if (data._meta) {
+    cleaned._meta = { ...cleaned._meta, ...data._meta };
+  }
+
+  if (data._meta?.version && typeof data._meta.version === 'number') {
+    cleaned.version = data._meta.version;
+  }
+
+  try {
+    const migrated = runMigrations(cleaned);
+    return { ok: true, db: migrated, legacyFormat: false };
+  } catch (e) {
+    return { ok: false, error: `数据迁移失败：${e.message}` };
+  }
+}
+
+export { TABLES, TABLE_LABELS, DB_VERSION, DB_KEY };
