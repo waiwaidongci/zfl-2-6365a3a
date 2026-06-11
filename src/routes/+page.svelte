@@ -1018,7 +1018,13 @@
         </div>
         <div class="actor-list">
           {#each filteredActors as actor}
-            <div class="actor-card" on:click={() => openActorDetail(actor)}>
+            <article class="actor-card card-clickable">
+              <button
+                type="button"
+                class="card-overlay-btn"
+                aria-label={`查看${actor.name}详情`}
+                on:click={() => openActorDetail(actor)}
+              ></button>
               <div class="actor-card-header">
                 <strong class="actor-name">{actor.name}</strong>
                 <span class="actor-size-tag">{actor.size || '未填尺码'}</span>
@@ -1033,7 +1039,7 @@
               {#if actor.note}
                 <p class="actor-note">{actor.note}</p>
               {/if}
-            </div>
+            </article>
           {/each}
           {#if filteredActors.length === 0}
             <div class="record-empty" style="padding: 20px;">
