@@ -107,6 +107,17 @@
     return workOrders.find((wo) => wo.costumeId === costumeId && (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中'));
   }
 
+  function canLend(costumeId) {
+    const costume = costumes.find((c) => c.id === costumeId);
+    if (!costume) return { can: false, reason: '服装不存在' };
+    if (costume.status === '借出') return { can: false, reason: '该服装已借出' };
+    if (costume.clean === '待清洗') return { can: false, reason: '该服装待清洗，请先完成清洗' };
+    if (costume.clean === '维修中') return { can: false, reason: '该服装维修中，请先完成维修' };
+    const activeWO = getActiveWorkOrder(costumeId);
+    if (activeWO) return { can: false, reason: `该服装${activeWO.type}中，请先完成${activeWO.type}工单` };
+    return { can: true, reason: '' };
+  }
+
   function checkConflict(costumeId, date, excludeId = null) {
     const costume = costumes.find((c) => c.id === costumeId);
     const conflicts = [];
@@ -514,6 +525,11 @@
   }
 
   function openLend(id) {
+    const checkResult = canLend(id);
+    if (!checkResult.can) {
+      alert(checkResult.reason);
+      return;
+    }
     lendingId = id;
     lendingBorrower = '';
   }
@@ -528,9 +544,9 @@
     if (!borrower) return;
     const costume = costumes.find((c) => c.id === lendingId);
     if (!costume) return;
-    const activeWorkOrder = getActiveWorkOrder(lendingId);
-    if (activeWorkOrder) {
-      alert(`该服装当前${activeWorkOrder.type}中，无法借出。请先完成${activeWorkOrder.type}工单。`);
+    const checkResult = canLend(lendingId);
+    if (!checkResult.can) {
+      alert(checkResult.reason);
       return;
     }
     const dueDate = iso(7);
@@ -808,17 +824,31 @@
             <div class="actions" role="group" aria-label="服装操作">
               {#if item.status === '借出'}
                 <button type="button" on:click={() => returnBack(item.id)}><Undo2 size={16} />归还</button>
-              {:else if activeWO}
-                <button type="button" disabled><Clock size={16} />{activeWO.type}中</button>
+              {:else if activeWO || item.clean === '待清洗' || item.clean === '维修中'}
+                <button type="button" disabled>
+                  <Clock size={16} />
+                  {#if activeWO}{activeWO.type}中
+                  {:else if item.clean === '维修中'}维修中
+                  {:else}待清洗{/if}
+                </button>
               {:else}
                 <button type="button" on:click={() => openLend(item.id)}><Clock size={16} />借出</button>
               {/if}
               <button type="button" class="secondary" on:click={() => openReserve(item.id)}><Calendar size={16} />预约</button>
-              {#if !activeWO && item.status === '在库'}
+              {#if !activeWO && item.status === '在库' && item.clean !== '维修中' && item.clean !== '待清洗'}
                 <button type="button" class="secondary" on:click={() => openCreateWorkOrder(item.id, '维修')}><Wrench size={16} />报修</button>
               {/if}
               {#if activeWO}
                 <button type="button" class="secondary" on:click={() => openWorkOrderDetail(activeWO.id)}><Eye size={16} />查看工单</button>
+              {:else if item.clean === '待清洗' || item.clean === '维修中'}
+                <span class="clean-status-tag">
+                  {#if item.clean === '维修中'}
+                    <Wrench size={12} />
+                  {:else}
+                    <Droplets size={12} />
+                  {/if}
+                  {item.clean}
+                </span>
               {/if}
             </div>
           </article>
@@ -1597,6 +1627,7 @@
   .record-cancelled { opacity: 0.55; background: #faf6f2; }
   .record-overdue { border-color: #e0c9b8; background: #fff8f0; }
   .small-btn { padding: 5px 10px; font-size: 12px; min-height: auto; }
+  .clean-status-tag { display: inline-flex; align-items: center; gap: 4px; padding: 5px 10px; border-radius: 6px; font-size: 12px; font-weight: 500; background: #fff4e6; color: #8a5a1a; border: 1px solid #e0c9a8; }
   .conflict-box { background: #fff4e6; border: 1px solid #e0c9a8; border-radius: 8px; padding: 12px 14px; }
   .conflict-title { display: flex; align-items: center; gap: 8px; color: #8a5a1a; margin-bottom: 8px; }
   .conflict-item { margin: 2px 0; font-size: 13px; color: #6b4a2a; }
