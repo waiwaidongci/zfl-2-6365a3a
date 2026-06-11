@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw } from 'lucide-svelte';
+  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays } from 'lucide-svelte';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -15,7 +15,13 @@
     { id: crypto.randomUUID(), name: '黑色燕尾服', size: 'XL', play: '午夜排练', location: '一楼贵重衣架', clean: '已清洗', borrower: '陈一', due: iso(3), status: '借出', note: '含配套领结' }
   ];
 
+  const seedReservations = [
+    { id: crypto.randomUUID(), costumeId: seed[1].id, costumeName: seed[1].name, play: seed[1].play, date: iso(5), type: '演员', reservedFor: '林婉', createdAt: new Date().toISOString(), status: 'active', note: '下午场排练使用' },
+    { id: crypto.randomUUID(), costumeId: seed[1].id, costumeName: seed[1].name, play: seed[1].play, date: iso(10), type: '场次', reservedFor: '第三幕联排', createdAt: new Date().toISOString(), status: 'active', note: '' }
+  ];
+
   let costumes = seed;
+  let reservations = seedReservations;
   let query = '';
   let playFilter = '全部剧目';
   let showOverdue = false;
@@ -31,12 +37,18 @@
   let recordQuery = '';
   let lendingId = null;
   let lendingBorrower = '';
+  let reservingId = null;
+  let reservationForm = { date: iso(1), type: '演员', reservedFor: '', note: '' };
+  let reservationQuery = '';
+  let reservationFilter = '全部';
 
   onMount(() => {
     const stored = localStorage.getItem('zfl-2-costumes');
     if (stored) costumes = JSON.parse(stored);
     const storedRecords = localStorage.getItem('zfl-2-records');
     if (storedRecords) records = JSON.parse(storedRecords);
+    const storedReservations = localStorage.getItem('zfl-2-reservations');
+    if (storedReservations) reservations = JSON.parse(storedReservations);
   });
 
   let localStorageAvailable = typeof localStorage !== 'undefined';
@@ -51,6 +63,88 @@
     if (localStorageAvailable) {
       localStorage.setItem('zfl-2-records', JSON.stringify(records));
     }
+  }
+
+  function persistReservations() {
+    if (localStorageAvailable) {
+      localStorage.setItem('zfl-2-reservations', JSON.stringify(reservations));
+    }
+  }
+
+  function checkConflict(costumeId, date, excludeId = null) {
+    const costume = costumes.find((c) => c.id === costumeId);
+    const conflicts = [];
+    if (costume && costume.status === '借出' && costume.due) {
+      const borrowStart = new Date(iso(0));
+      const borrowDue = new Date(costume.due);
+      const targetDate = new Date(date);
+      if (targetDate >= borrowStart && targetDate <= borrowDue) {
+        conflicts.push({ type: '借出', detail: `${costume.borrower}借用至${costume.due}` });
+      }
+    }
+    reservations.forEach((r) => {
+      if (r.status !== 'active') return;
+      if (excludeId && r.id === excludeId) return;
+      if (r.costumeId === costumeId && r.date === date) {
+        conflicts.push({ type: '预约', detail: `${r.type}：${r.reservedFor}（${r.date}）` });
+      }
+    });
+    return conflicts;
+  }
+
+  function getUpcomingReservations(costumeId) {
+    const today = iso(0);
+    return reservations
+      .filter((r) => r.costumeId === costumeId && r.status === 'active' && r.date >= today)
+      .sort((a, b) => new Date(a.date) - new Date(b.date));
+  }
+
+  function getLatestReservation(costumeId) {
+    const upcoming = getUpcomingReservations(costumeId);
+    return upcoming.length > 0 ? upcoming[0] : null;
+  }
+
+  function openReserve(id) {
+    reservingId = id;
+    reservationForm = { date: iso(1), type: '演员', reservedFor: '', note: '' };
+  }
+
+  function closeReserve() {
+    reservingId = null;
+    reservationForm = { date: iso(1), type: '演员', reservedFor: '', note: '' };
+  }
+
+  function confirmReserve() {
+    if (!reservationForm.reservedFor.trim() || !reservationForm.date) return;
+    const costume = costumes.find((c) => c.id === reservingId);
+    if (!costume) return;
+    const conflicts = checkConflict(reservingId, reservationForm.date);
+    if (conflicts.length > 0) return;
+    const reservation = {
+      id: crypto.randomUUID(),
+      costumeId: costume.id,
+      costumeName: costume.name,
+      play: costume.play,
+      date: reservationForm.date,
+      type: reservationForm.type,
+      reservedFor: reservationForm.reservedFor.trim(),
+      createdAt: new Date().toISOString(),
+      status: 'active',
+      note: reservationForm.note.trim()
+    };
+    reservations = [reservation, ...reservations];
+    persistReservations();
+    addRecord('预约', costume, reservationForm.reservedFor.trim(), `预约「${costume.name}」于${reservationForm.date}，${reservationForm.type}：${reservationForm.reservedFor.trim()}`);
+    closeReserve();
+  }
+
+  function cancelReservation(id) {
+    const reservation = reservations.find((r) => r.id === id);
+    if (!reservation) return;
+    reservations = reservations.map((r) => r.id === id ? { ...r, status: 'cancelled' } : r);
+    persistReservations();
+    const costume = { name: reservation.costumeName, play: reservation.play };
+    addRecord('取消预约', costume, '系统', `取消「${reservation.costumeName}」于${reservation.date}的预约（${reservation.type}：${reservation.reservedFor}）`);
   }
 
   function addRecord(type, costume, operator, summary) {
@@ -91,6 +185,20 @@
   $: overdueCount = costumes.filter((item) => item.status === '借出' && item.due && new Date(item.due) < new Date(iso(0))).length;
   $: borrowedCount = costumes.filter((item) => item.status === '借出').length;
   $: cleanWaitCount = costumes.filter((item) => item.clean === '待清洗').length;
+  $: activeReservationCount = reservations.filter((r) => r.status === 'active').length;
+  $: filteredReservations = reservations.filter((r) => {
+    const text = `${r.costumeName}${r.play}${r.reservedFor}`;
+    const matchesQuery = text.includes(reservationQuery.trim());
+    const today = iso(0);
+    let matchesFilter = true;
+    if (reservationFilter === '即将到来') matchesFilter = r.status === 'active' && r.date >= today;
+    else if (reservationFilter === '已过期') matchesFilter = r.status === 'active' && r.date < today;
+    else if (reservationFilter === '已取消') matchesFilter = r.status === 'cancelled';
+    else if (reservationFilter === '有效') matchesFilter = r.status === 'active';
+    return matchesQuery && matchesFilter;
+  }).sort((a, b) => new Date(a.date) - new Date(b.date));
+  $: reservingCostume = costumes.find((item) => item.id === reservingId);
+  $: currentConflicts = reservingCostume ? checkConflict(reservingCostume.id, reservationForm.date) : [];
 
   function saveCostume() {
     if (!form.name.trim() || !form.play.trim()) return;
@@ -252,7 +360,9 @@
 
   function handleModalKeydown(e) {
     if (e.key === 'Escape') {
-      if (lendingId) {
+      if (reservingId) {
+        closeReserve();
+      } else if (lendingId) {
         closeLend();
       } else if (showImportModal) {
         closeImportModal();
@@ -274,6 +384,7 @@
     <div class="stats">
       <b><Shirt size={18} />{costumes.length}件服装</b>
       <b><Clock size={18} />{borrowedCount}件借出</b>
+      <b><CalendarDays size={18} />{activeReservationCount}个预约</b>
       <b><Archive size={18} />{cleanWaitCount}件待清洗</b>
       <b class:danger={overdueCount > 0}>{overdueCount}件逾期</b>
     </div>
@@ -310,6 +421,7 @@
 
       <div class="cards">
         {#each filtered as item}
+          {@const latestRes = getLatestReservation(item.id)}
           <article
             class:item-overdue={item.status === '借出' && item.due && new Date(item.due) < new Date(iso(0))}
             class="card-clickable"
@@ -326,12 +438,18 @@
             </div>
             <p>{item.location} · {item.clean}</p>
             <p>{item.status === '借出' ? `${item.borrower}借用至${item.due}` : '当前在库'}</p>
+            {#if latestRes}
+              <p class="reservation-info">
+                <Calendar size={13} />下次预约：{latestRes.date} · {latestRes.type === '演员' ? '演员' : '场次'}：{latestRes.reservedFor}
+              </p>
+            {/if}
             <div class="actions" role="group" aria-label="服装操作">
               {#if item.status === '借出'}
                 <button type="button" on:click={() => returnBack(item.id)}><Undo2 size={16} />归还</button>
               {:else}
                 <button type="button" on:click={() => openLend(item.id)}><Clock size={16} />借出</button>
               {/if}
+              <button type="button" class="secondary" on:click={() => openReserve(item.id)}><Calendar size={16} />预约</button>
               <button type="button" class="secondary" on:click={() => updateClean(item.id, item.clean === '已清洗' ? '待清洗' : '已清洗')}><CheckCircle2 size={16} />{item.clean === '已清洗' ? '标待洗' : '标已洗'}</button>
             </div>
           </article>
@@ -368,6 +486,67 @@
 
   <section class="panel">
     <div class="record-header">
+      <h2><CalendarDays size={18} />排练预约</h2>
+      <span class="record-count">共 {filteredReservations.length} 条</span>
+    </div>
+    <div class="record-toolbar">
+      <label><Search size={16} /><input bind:value={reservationQuery} placeholder="搜索服装/剧目/预约方" /></label>
+      <select bind:value={reservationFilter}>
+        <option>全部</option>
+        <option>有效</option>
+        <option>即将到来</option>
+        <option>已过期</option>
+        <option>已取消</option>
+      </select>
+    </div>
+    <div class="record-list">
+      {#each filteredReservations as reservation}
+        <div class="record-item" class:record-cancelled={reservation.status === 'cancelled'} class:record-overdue={reservation.status === 'active' && reservation.date < iso(0)}>
+          <div class="record-type-badge record-type-{reservation.status === 'cancelled' ? '取消预约' : (reservation.date < iso(0) ? '已过期' : '预约')}">
+            {#if reservation.status === 'cancelled'}
+              <XCircle size={14} />
+              已取消
+            {:else if reservation.date < iso(0)}
+              <AlertTriangle size={14} />
+              已过期
+            {:else}
+              <Calendar size={14} />
+              预约
+            {/if}
+          </div>
+          <div class="record-content">
+            <div class="record-title-row">
+              <strong class="record-name">{reservation.costumeName}</strong>
+              <span class="record-play-tag">{reservation.play}</span>
+              <span class="record-play-tag reservation-date-tag"><Calendar size={12} />{reservation.date}</span>
+            </div>
+            <p class="record-summary">
+              {reservation.type === '演员' ? '演员' : '场次'}：{reservation.reservedFor}
+              {#if reservation.note} · 备注：{reservation.note}{/if}
+            </p>
+            <div class="record-footer">
+              <span class="record-operator">创建时间：{formatTime(reservation.createdAt)}</span>
+              {#if reservation.status === 'active'}
+                <button type="button" class="danger-outline small-btn" on:click={() => cancelReservation(reservation.id)}>
+                  <XCircle size={12} />取消预约
+                </button>
+              {/if}
+            </div>
+          </div>
+        </div>
+      {/each}
+      {#if filteredReservations.length === 0}
+        <div class="record-empty">
+          <CalendarDays size={32} />
+          <p>暂无预约</p>
+          <span>点击服装卡片上的「预约」按钮创建新预约</span>
+        </div>
+      {/if}
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="record-header">
       <h2><List size={18} />借还记录</h2>
       <span class="record-count">共 {records.length} 条记录</span>
     </div>
@@ -386,6 +565,10 @@
               <Undo2 size={14} />
             {:else if record.type === '清洗'}
               <RotateCcw size={14} />
+            {:else if record.type === '预约'}
+              <Calendar size={14} />
+            {:else if record.type === '取消预约'}
+              <XCircle size={14} />
             {/if}
             {record.type}
           </div>
@@ -523,6 +706,74 @@
           <div class="modal-actions">
             <button type="button" class="secondary" on:click={closeLend}>取消</button>
             <button type="submit" disabled={!lendingBorrower.trim()}><Clock size={16} />确认借出</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  {/if}
+
+  {#if reservingCostume}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay" role="presentation" on:click={closeReserve}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="reserve-title"
+        on:click|stopPropagation
+        on:keydown={handleModalKeydown}
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h2 id="reserve-title">预约服装</h2>
+          <button type="button" class="icon-btn" on:click={closeReserve} aria-label="关闭"><X size={20} /></button>
+        </div>
+        <form class="lend-form" on:submit|preventDefault={confirmReserve}>
+          <div class="status-info">
+            <p><strong>服装：</strong>{reservingCostume.name}</p>
+            <p><strong>剧目：</strong>{reservingCostume.play}</p>
+            {#if reservingCostume.status === '借出'}
+              <p><strong>当前状态：</strong>借出中（{reservingCostume.borrower}借用至{reservingCostume.due}）</p>
+            {/if}
+          </div>
+          <label>
+            <span>预约日期</span>
+            <input type="date" bind:value={reservationForm.date} min={iso(0)} required />
+          </label>
+          <label>
+            <span>预约类型</span>
+            <select bind:value={reservationForm.type}>
+              <option value="演员">演员</option>
+              <option value="场次">排练场次</option>
+            </select>
+          </label>
+          <label>
+            <span>{reservationForm.type === '演员' ? '演员姓名' : '场次名称'}</span>
+            <input bind:value={reservationForm.reservedFor} placeholder={reservationForm.type === '演员' ? '请输入演员姓名' : '请输入场次名称'} required />
+          </label>
+          <label>
+            <span>备注</span>
+            <input bind:value={reservationForm.note} placeholder="选填" />
+          </label>
+
+          {#if currentConflicts.length > 0}
+            <div class="conflict-box">
+              <div class="conflict-title">
+                <AlertTriangle size={16} />
+                <strong>该日期存在冲突</strong>
+              </div>
+              {#each currentConflicts as conflict}
+                <p class="conflict-item">· {conflict.type}：{conflict.detail}</p>
+              {/each}
+            </div>
+          {/if}
+
+          <div class="modal-actions">
+            <button type="button" class="secondary" on:click={closeReserve}>取消</button>
+            <button type="submit" disabled={!reservationForm.reservedFor.trim() || !reservationForm.date || currentConflicts.length > 0}>
+              <Calendar size={16} />确认预约
+            </button>
           </div>
         </form>
       </div>
@@ -697,10 +948,14 @@
   .record-type-借出 { background: #fff0e6; color: #8a4a1a; }
   .record-type-归还 { background: #e6eef6; color: #1a4a8a; }
   .record-type-清洗 { background: #f0e6f6; color: #5a1a8a; }
+  .record-type-预约 { background: #e6eef6; color: #1a4a8a; }
+  .record-type-取消预约 { background: #f6e6e6; color: #8a2d2d; }
+  .record-type-已过期 { background: #fff4e6; color: #8a5a1a; }
   .record-content { flex: 1; min-width: 0; }
   .record-title-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
   .record-name { font-size: 15px; color: #26211c; }
-  .record-play-tag { font-size: 12px; color: #6b5a4d; background: #f0e6dc; padding: 2px 8px; border-radius: 4px; }
+  .record-play-tag { font-size: 12px; color: #6b5a4d; background: #f0e6dc; padding: 2px 8px; border-radius: 4px; display: inline-flex; align-items: center; gap: 4px; }
+  .reservation-date-tag { background: #e6eef6; color: #1a4a8a; }
   .record-summary { margin: 0 0 8px; font-size: 13px; color: #4a3b30; line-height: 1.5; }
   .record-footer { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
   .record-operator { font-size: 12px; color: #6b5a4d; }
@@ -708,5 +963,13 @@
   .record-empty { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 40px 20px; color: #8a7665; }
   .record-empty p { margin: 0; font-size: 15px; color: #6b5a4d; }
   .record-empty span { font-size: 13px; }
-  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } .record-item { flex-direction: column; } .record-footer { flex-direction: column; align-items: flex-start; } }
+  .record-toolbar { display: grid; grid-template-columns: 1fr 150px; gap: 10px; align-items: center; }
+  .reservation-info { display: inline-flex; align-items: center; gap: 4px; margin: 4px 0 0; padding: 4px 10px; background: #e6eef6; color: #1a4a8a; border-radius: 6px; font-size: 12px; }
+  .record-cancelled { opacity: 0.55; background: #faf6f2; }
+  .record-overdue { border-color: #e0c9b8; background: #fff8f0; }
+  .small-btn { padding: 5px 10px; font-size: 12px; min-height: auto; }
+  .conflict-box { background: #fff4e6; border: 1px solid #e0c9a8; border-radius: 8px; padding: 12px 14px; }
+  .conflict-title { display: flex; align-items: center; gap: 8px; color: #8a5a1a; margin-bottom: 8px; }
+  .conflict-item { margin: 2px 0; font-size: 13px; color: #6b4a2a; }
+  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar, .record-toolbar { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } .record-item { flex-direction: column; } .record-footer { flex-direction: column; align-items: flex-start; } }
 </style>
