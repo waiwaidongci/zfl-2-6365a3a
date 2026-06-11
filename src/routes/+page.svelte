@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2 } from 'lucide-svelte';
+  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save } from 'lucide-svelte';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -20,6 +20,9 @@
   let playFilter = '全部剧目';
   let showOverdue = false;
   let form = { name: '', size: '', play: '', location: '', clean: '已清洗', borrower: '', due: '', status: '在库', note: '' };
+  let selectedId = null;
+  let editForm = { name: '', size: '', play: '', location: '', clean: '已清洗', note: '' };
+  let showDeleteConfirm = false;
 
   onMount(() => {
     const stored = localStorage.getItem('zfl-2-costumes');
@@ -57,6 +60,45 @@
   function updateClean(id, clean) {
     costumes = costumes.map((item) => item.id === id ? { ...item, clean } : item);
   }
+
+  function openDetail(item) {
+    selectedId = item.id;
+    editForm = {
+      name: item.name,
+      size: item.size,
+      play: item.play,
+      location: item.location,
+      clean: item.clean,
+      note: item.note
+    };
+    showDeleteConfirm = false;
+  }
+
+  function closeDetail() {
+    selectedId = null;
+    showDeleteConfirm = false;
+  }
+
+  function saveDetail() {
+    if (!editForm.name.trim() || !editForm.play.trim()) return;
+    costumes = costumes.map((item) => item.id === selectedId ? { ...item, ...editForm } : item);
+    closeDetail();
+  }
+
+  function askDelete() {
+    showDeleteConfirm = true;
+  }
+
+  function cancelDelete() {
+    showDeleteConfirm = false;
+  }
+
+  function confirmDelete() {
+    costumes = costumes.filter((item) => item.id !== selectedId);
+    closeDetail();
+  }
+
+  $: selected = costumes.find((item) => item.id === selectedId);
 </script>
 
 <main>
@@ -104,14 +146,14 @@
 
       <div class="cards">
         {#each filtered as item}
-          <article class:item-overdue={item.status === '借出' && item.due && new Date(item.due) < new Date(iso(0))}>
+          <article class:item-overdue={item.status === '借出' && item.due && new Date(item.due) < new Date(iso(0))} class="card-clickable" on:click={() => openDetail(item)}>
             <div>
               <strong>{item.name}</strong>
               <span>{item.play} · {item.size || '未填尺码'}</span>
             </div>
             <p>{item.location} · {item.clean}</p>
             <p>{item.status === '借出' ? `${item.borrower}借用至${item.due}` : '当前在库'}</p>
-            <div class="actions">
+            <div class="actions" on:click|stopPropagation>
               {#if item.status === '借出'}
                 <button type="button" on:click={() => returnBack(item.id)}><Undo2 size={16} />归还</button>
               {:else}
@@ -136,6 +178,77 @@
       {/each}
     </div>
   </section>
+
+  {#if selected}
+    <div class="modal-overlay" on:click={closeDetail}>
+      <div class="modal" on:click|stopPropagation>
+        <div class="modal-header">
+          <h2>服装详情</h2>
+          <button type="button" class="icon-btn" on:click={closeDetail} aria-label="关闭"><X size={20} /></button>
+        </div>
+
+        {#if showDeleteConfirm}
+          <div class="confirm-box">
+            <p>确定要删除「{selected.name}」的档案吗？此操作不可撤销。</p>
+            <div class="confirm-actions">
+              <button type="button" class="secondary" on:click={cancelDelete}>取消</button>
+              <button type="button" class="danger" on:click={confirmDelete}><Trash2 size={16} />确认删除</button>
+            </div>
+          </div>
+        {:else}
+          <form class="detail-form" on:submit|preventDefault={saveDetail}>
+            <label>
+              <span>服装名称</span>
+              <input bind:value={editForm.name} placeholder="服装名称" required />
+            </label>
+            <div class="split">
+              <label>
+                <span>尺码</span>
+                <input bind:value={editForm.size} placeholder="尺码" />
+              </label>
+              <label>
+                <span>所属剧目</span>
+                <input bind:value={editForm.play} placeholder="所属剧目" required />
+              </label>
+            </div>
+            <label>
+              <span>存放位置</span>
+              <input bind:value={editForm.location} placeholder="存放位置" />
+            </label>
+            <label>
+              <span>清洗状态</span>
+              <select bind:value={editForm.clean}>
+                <option>已清洗</option>
+                <option>待清洗</option>
+                <option>维修中</option>
+              </select>
+            </label>
+            <label>
+              <span>备注</span>
+              <input bind:value={editForm.note} placeholder="备注" />
+            </label>
+
+            {#if selected.status === '借出'}
+              <div class="status-info">
+                <p><strong>当前状态：</strong>{selected.status}</p>
+                <p><strong>借用人：</strong>{selected.borrower}</p>
+                <p><strong>应还日期：</strong>{selected.due}</p>
+              </div>
+            {:else}
+              <div class="status-info">
+                <p><strong>当前状态：</strong>在库</p>
+              </div>
+            {/if}
+
+            <div class="modal-actions">
+              <button type="button" class="danger-outline" on:click={askDelete}><Trash2 size={16} />删除档案</button>
+              <button type="submit"><Save size={16} />保存修改</button>
+            </div>
+          </form>
+        {/if}
+      </div>
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -170,5 +283,28 @@
   .secondary { background: #efe4d9; color: #37261d; }
   .playGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 10px; }
   .playGrid button { justify-content: space-between; background: #f6efe7; color: #2a211b; border: 1px solid #e3d4c7; }
-  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } }
+  .card-clickable { cursor: pointer; transition: transform .15s ease, box-shadow .15s ease; }
+  .card-clickable:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgb(62 42 24 / .12); }
+  .modal-overlay { position: fixed; inset: 0; background: rgb(38 33 28 / .55); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 100; }
+  .modal { background: #fff; border-radius: 12px; width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; box-shadow: 0 24px 60px rgb(38 33 28 / .25); }
+  .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid #e4d8cc; position: sticky; top: 0; background: #fff; border-radius: 12px 12px 0 0; }
+  .modal-header h2 { margin: 0; }
+  .icon-btn { background: transparent; color: #6b5a4d; padding: 6px; border-radius: 6px; }
+  .icon-btn:hover { background: #f6efe7; }
+  .detail-form { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .detail-form label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #6b5a4d; }
+  .detail-form label span { font-weight: 500; }
+  .status-info { background: #f6efe7; border-radius: 8px; padding: 12px 14px; margin: 4px 0; }
+  .status-info p { margin: 4px 0; font-size: 14px; color: #4a3b30; }
+  .modal-actions { display: flex; justify-content: space-between; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+  .modal-actions button { flex: 1; min-width: 140px; }
+  .danger { background: #b84a3b; }
+  .danger:hover { background: #a03e30; }
+  .danger-outline { background: transparent; color: #b84a3b; border: 1px solid #d9b5ad; }
+  .danger-outline:hover { background: #fdf0ec; }
+  .confirm-box { padding: 24px 20px; }
+  .confirm-box p { margin: 0 0 18px; font-size: 15px; line-height: 1.6; color: #3b2f26; }
+  .confirm-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
+  .confirm-actions button { min-width: 100px; }
+  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } }
 </style>
