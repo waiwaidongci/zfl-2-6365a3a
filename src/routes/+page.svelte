@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal, Package, Printer, Box, AlertOctagon, Database, RefreshCw, HardDrive } from 'lucide-svelte';
+  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal, Package, Printer, Box, AlertOctagon, Database, RefreshCw, HardDrive, LayoutGrid } from 'lucide-svelte';
   import {
     initializeDatabase,
     getAll,
@@ -17,6 +17,8 @@
     removeLegacyKeys,
     TABLES
   } from '$lib/database.js';
+  import ScheduleKanban from '$lib/ScheduleKanban.svelte';
+  import { getAllSchedules } from '$lib/scheduleStore.js';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -67,6 +69,7 @@
   let workOrders = seedWorkOrders;
   let actors = seedActors;
   let packingLists = seedPackingLists;
+  let schedules = [];
   let packingListQuery = '';
   let packingListFilter = '全部';
   let showPackingListModal = false;
@@ -130,6 +133,7 @@
 
   let dbStats = null;
   let showDataManager = false;
+  let showScheduleKanban = false;
   let restorePreview = null;
   let restoreFileContent = '';
   let restoreError = '';
@@ -144,6 +148,7 @@
     workOrders = db.tables[TABLES.workOrders] || [];
     actors = db.tables[TABLES.actors] || [];
     packingLists = db.tables[TABLES.packingLists] || [];
+    schedules = db.tables[TABLES.schedules] || [];
     dbStats = getDBStats();
     if (hadLegacy && db.migratedAt) {
       dbMigrationNotice = '检测到旧版数据已自动迁移到新版数据层，可在数据管理中查看详情。';
@@ -174,6 +179,15 @@
 
   function persistPackingLists() {
     setAll(TABLES.packingLists, packingLists);
+  }
+
+  function persistSchedules() {
+    setAll(TABLES.schedules, schedules);
+  }
+
+  function handleScheduleChange() {
+    schedules = getAllSchedules();
+    refreshDBStats();
   }
 
   function refreshDBStats() {
@@ -262,6 +276,7 @@
     workOrders = db.tables[TABLES.workOrders] || [];
     actors = db.tables[TABLES.actors] || [];
     packingLists = db.tables[TABLES.packingLists] || [];
+    schedules = db.tables[TABLES.schedules] || [];
     refreshDBStats();
     closeDataManager();
   }
@@ -945,6 +960,7 @@
   $: inProgressWorkOrderCount = workOrders.filter((wo) => wo.status === '清洗中' || wo.status === '维修中').length;
   $: completedWorkOrderCount = workOrders.filter((wo) => wo.status === '已完成').length;
   $: overdueWorkOrderCount = workOrders.filter((wo) => (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中') && wo.dueDate && new Date(wo.dueDate) < new Date(iso(0))).length;
+  $: scheduleCount = schedules.length;
   $: filteredWorkOrders = workOrders.filter((wo) => {
     const text = `${wo.costumeName}${wo.play}${wo.assignee}`;
     const matchesQuery = text.includes(workOrderQuery.trim());
@@ -1232,9 +1248,13 @@
       <b><CalendarDays size={18} />{activeReservationCount}个预约</b>
       <b><Archive size={18} />{cleanWaitCount}件待清洗</b>
       <b><Package size={18} />{packingLists.length}个装箱单</b>
+      <b><LayoutGrid size={18} />{scheduleCount}条排期</b>
       <b class:danger={overdueCount > 0}><AlertTriangle size={18} />{overdueCount}项逾期</b>
       <button type="button" class="hero-data-btn" on:click={openDataManager}>
         <Database size={16} />数据管理
+      </button>
+      <button type="button" class="hero-data-btn" on:click={() => showScheduleKanban = !showScheduleKanban}>
+        <LayoutGrid size={16} />排期看板
       </button>
     </div>
   </header>
@@ -1284,6 +1304,19 @@
       </div>
     </div>
   </section>
+
+  {#if showScheduleKanban}
+    <section class="panel">
+      <ScheduleKanban
+        {schedules}
+        {costumes}
+        {reservations}
+        {workOrders}
+        {packingLists}
+        on:change={handleScheduleChange}
+      />
+    </section>
+  {/if}
 
   <section class="layout">
     <form class="panel" on:submit|preventDefault={saveCostume}>
@@ -2681,6 +2714,10 @@
                 <div class="db-stat-card">
                   <div class="db-stat-num">{dbStats.tables.packingLists}</div>
                   <div class="db-stat-label">装箱单</div>
+                </div>
+                <div class="db-stat-card">
+                  <div class="db-stat-num">{dbStats.tables.schedules || 0}</div>
+                  <div class="db-stat-label">演出排期</div>
                 </div>
               </div>
             </div>
