@@ -37,7 +37,8 @@ export const REFERENCE_FIELDS = {
     { path: 'items', itemField: 'costumeId' }
   ],
   [TABLES.schedules]: ['linkedCostumeIds'],
-  [TABLES.inventoryItems]: ['costumeId']
+  [TABLES.inventoryItems]: ['costumeId'],
+  [TABLES.records]: ['costumeId']
 };
 
 export const MERGE_TABLES = [
@@ -417,6 +418,48 @@ export function remapReferencesInRecord(rec, table, costumeIdMap) {
   return result;
 }
 
+function cleanupDanglingRefs(rec, table, deletedIds, validIds) {
+  if (!rec || deletedIds.size === 0) return rec;
+  const refs = REFERENCE_FIELDS[table];
+  if (!refs) return rec;
+
+  const result = deepClone(rec);
+  let modified = false;
+
+  for (const refDef of refs) {
+    if (typeof refDef === 'string') {
+      const val = result[refDef];
+      if (typeof val === 'string' && deletedIds.has(val)) {
+        result[refDef] = null;
+        result[refDef + '_dangling_note'] = '原引用服装已删除';
+        modified = true;
+      } else if (Array.isArray(val)) {
+        const filtered = val.filter((v) => !deletedIds.has(v));
+        if (filtered.length !== val.length) {
+          result[refDef] = filtered;
+          modified = true;
+        }
+      }
+    } else if (refDef.path && refDef.itemField) {
+      const items = result[refDef.path];
+      if (Array.isArray(items)) {
+        const cleaned = items.map((item) => {
+          if (item && deletedIds.has(item[refDef.itemField])) {
+            return { ...item, [refDef.itemField]: null, _dangling_note: '原引用服装已删除' };
+          }
+          return item;
+        });
+        if (JSON.stringify(cleaned) !== JSON.stringify(items)) {
+          result[refDef.path] = cleaned;
+          modified = true;
+        }
+      }
+    }
+  }
+
+  return modified ? result : rec;
+}
+
 export function applyMerge(currentDB, importDB, diffResult, decisions) {
   const merged = deepClone(currentDB);
   const costumeIdMap = {};
@@ -452,6 +495,9 @@ export function applyMerge(currentDB, importDB, diffResult, decisions) {
             rec = { ...rec, id: newId };
           }
         }
+        if (dec.choice === DECISION_CHOICES.USE_IMPORT && item.current !== null && item.imported === null) {
+          continue;
+        }
       }
 
       if (!rec.id) rec.id = crypto.randomUUID();
@@ -470,10 +516,25 @@ export function applyMerge(currentDB, importDB, diffResult, decisions) {
     merged.tables[table] = finalRecords;
   }
 
+  const deletedCostumeIds = new Set();
+  for (const item of diffResult.tables[TABLES.costumes]?.[DIFF_TYPES.DELETED_SUSPECT] || []) {
+    const dec = decisions[TABLES.costumes]?.[item.id];
+    if (dec?.choice === DECISION_CHOICES.USE_IMPORT) {
+      deletedCostumeIds.add(item.id);
+    }
+  }
+
+  const mergedCostumeIds = new Set((merged.tables[TABLES.costumes] || []).map((c) => c.id));
+
   for (const table of Object.keys(REFERENCE_FIELDS)) {
     if (Object.keys(costumeIdMap).length > 0) {
       merged.tables[table] = (merged.tables[table] || []).map((rec) =>
         remapReferencesInRecord(rec, table, costumeIdMap)
+      );
+    }
+    if (deletedCostumeIds.size > 0) {
+      merged.tables[table] = (merged.tables[table] || []).map((rec) =>
+        cleanupDanglingRefs(rec, table, deletedCostumeIds, mergedCostumeIds)
       );
     }
   }
@@ -484,6 +545,17 @@ export function applyMerge(currentDB, importDB, diffResult, decisions) {
       (r) => r && r.id && !curIds.has(r.id)
     );
     merged.tables[table] = [...(merged.tables[table] || []), ...toAdd.map((r) => deepClone(r))];
+
+    if (Object.keys(costumeIdMap).length > 0 && REFERENCE_FIELDS[table]) {
+      merged.tables[table] = (merged.tables[table] || []).map((rec) =>
+        remapReferencesInRecord(rec, table, costumeIdMap)
+      );
+    }
+    if (deletedCostumeIds.size > 0 && REFERENCE_FIELDS[table]) {
+      merged.tables[table] = (merged.tables[table] || []).map((rec) =>
+        cleanupDanglingRefs(rec, table, deletedCostumeIds, mergedCostumeIds)
+      );
+    }
   }
 
   return { db: merged, costumeIdMap };

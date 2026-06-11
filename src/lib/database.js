@@ -295,7 +295,10 @@ export function exportFullDatabase() {
     _meta: {
       version: db.version,
       exportedAt: new Date().toISOString(),
-      app: 'zfl-2-costume-lending'
+      app: 'zfl-2-costume-lending',
+      deviceId: db._meta?.deviceId || null,
+      lastMergeAt: db._meta?.lastMergeAt || null,
+      createdAt: db._meta?.createdAt || null
     },
     tables: db.tables
   };
@@ -442,7 +445,14 @@ export function parseBackupFile(jsonString) {
   }
 
   if (data._meta) {
-    cleaned._meta = { ...cleaned._meta, ...data._meta };
+    cleaned._meta = {
+      ...cleaned._meta,
+      deviceId: data._meta.deviceId || cleaned._meta.deviceId,
+      exportedAt: data._meta.exportedAt || null,
+      lastMergeAt: data._meta.lastMergeAt || null,
+      createdAt: data._meta.createdAt || cleaned._meta.createdAt,
+      sourceApp: data._meta.app || null
+    };
   }
 
   if (data._meta?.version && typeof data._meta.version === 'number') {

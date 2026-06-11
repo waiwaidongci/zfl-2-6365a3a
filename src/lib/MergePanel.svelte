@@ -113,16 +113,33 @@
     manualEditTable = table;
     manualEditItem = item;
     manualMergeData = {};
-    const base = decisions[table]?.[item.id]?.mergedData || item.current || item.imported || {};
+    const base = item.current || item.imported || {};
     for (const fc of item.fieldConflicts) {
       manualMergeData[fc.field] = base[fc.field] ?? fc.current ?? fc.imported;
     }
+    const merged = { ...base };
+    for (const [k, v] of Object.entries(manualMergeData)) {
+      merged[k] = v;
+    }
+    decisions = {
+      ...decisions,
+      [table]: {
+        ...(decisions[table] || {}),
+        [item.id]: {
+          choice: DECISION_CHOICES.MANUAL,
+          mergedData: merged
+        }
+      }
+    };
   }
 
-  function saveManualEdit() {
-    if (!manualEditTable || !manualEditItem) return;
+  function updateManualField(fieldName, value) {
+    manualMergeData[fieldName] = value;
+    manualMergeData = { ...manualMergeData };
     const item = manualEditItem;
-    const merged = { ...(item.current || item.imported || {}) };
+    if (!item) return;
+    const base = item.current || item.imported || {};
+    const merged = { ...base };
     for (const [k, v] of Object.entries(manualMergeData)) {
       merged[k] = v;
     }
@@ -136,12 +153,27 @@
         }
       }
     };
+  }
+
+  function saveManualEdit() {
     manualEditItem = null;
     manualEditTable = null;
     manualMergeData = {};
   }
 
   function cancelManualEdit() {
+    if (manualEditTable && manualEditItem) {
+      decisions = {
+        ...decisions,
+        [manualEditTable]: {
+          ...(decisions[manualEditTable] || {}),
+          [manualEditItem.id]: {
+            choice: null,
+            mergedData: null
+          }
+        }
+      };
+    }
     manualEditItem = null;
     manualEditTable = null;
     manualMergeData = {};
@@ -351,8 +383,8 @@
                             {#if dec?.choice === DECISION_CHOICES.MANUAL}
                               <td class="conflict-value manual">
                                 <input
-                                  value={manualMergeData[fc.field] ?? ''}
-                                  on:input={(e) => { manualMergeData[fc.field] = e.target.value; manualMergeData = { ...manualMergeData }; }}
+                                  value={manualEditItem?.id === item.id ? (manualMergeData[fc.field] ?? '') : (dec.mergedData?.[fc.field] ?? fieldValueToString(fc.current))}
+                                  on:input={(e) => { updateManualField(fc.field, e.target.value); }}
                                   placeholder={fieldValueToString(fc.current)}
                                 />
                               </td>

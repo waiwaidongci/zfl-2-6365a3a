@@ -406,10 +406,18 @@
       packingLists = fresh.tables[TABLES.packingLists] || [];
       schedules = fresh.tables[TABLES.schedules] || [];
       inventoryTasks = fresh.tables[TABLES.inventoryTasks] || [];
+      inventoryItems = fresh.tables[TABLES.inventoryItems] || [];
       refreshDBStats();
       closeMergePanel();
-      mergeSuccess = `合并成功！${Object.keys(costumeIdMap).length > 0 ? `已同步修正 ${Object.keys(costumeIdMap).length} 个服装ID引用。` : ''}`;
-      setTimeout(() => { mergeSuccess = ''; }, 5000);
+      const idRemapCount = Object.keys(costumeIdMap).length;
+      const deletedCostumeCount = (mergeDiffResult.tables[TABLES.costumes]?.deleted_suspect || []).filter(
+        (item) => finalDecisions[TABLES.costumes]?.[item.id]?.choice === 'use_import'
+      ).length;
+      let msg = '合并成功！';
+      if (idRemapCount > 0) msg += ` 已同步修正 ${idRemapCount} 个服装ID引用。`;
+      if (deletedCostumeCount > 0) msg += ` 已删除 ${deletedCostumeCount} 个服装并清理其悬空引用。`;
+      mergeSuccess = msg;
+      setTimeout(() => { mergeSuccess = ''; }, 6000);
     } catch (err) {
       mergeError = `合并失败：${err.message}`;
     }
