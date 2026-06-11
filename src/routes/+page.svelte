@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save } from 'lucide-svelte';
+  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle } from 'lucide-svelte';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -23,6 +23,10 @@
   let selectedId = null;
   let editForm = { name: '', size: '', play: '', location: '', clean: '已清洗', note: '' };
   let showDeleteConfirm = false;
+  let showImportModal = false;
+  let importPreview = [];
+  let importSkipped = [];
+  let importFile = null;
 
   onMount(() => {
     const stored = localStorage.getItem('zfl-2-costumes');
@@ -109,13 +113,82 @@
     closeDetail();
   }
 
+  function exportCostumes() {
+    const dataStr = JSON.stringify(costumes, null, 2);
+    const blob = new Blob([dataStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    const date = new Date().toISOString().slice(0, 10);
+    a.download = `costumes-${date}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function handleImportFile(e) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    importFile = file.name;
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      try {
+        const data = JSON.parse(event.target?.result);
+        const items = Array.isArray(data) ? data : [data];
+        const valid = [];
+        const skipped = [];
+        items.forEach((item, index) => {
+          if (item && typeof item === 'object' && item.name?.trim() && item.play?.trim()) {
+            valid.push({
+              id: crypto.randomUUID(),
+              name: item.name.trim(),
+              size: item.size || '',
+              play: item.play.trim(),
+              location: item.location || '',
+              clean: item.clean || '已清洗',
+              borrower: item.borrower || '',
+              due: item.due || '',
+              status: item.status || '在库',
+              note: item.note || ''
+            });
+          } else {
+            skipped.push({ index, name: item?.name || '(无名称)', play: item?.play || '(无剧目)' });
+          }
+        });
+        importPreview = valid;
+        importSkipped = skipped;
+        showImportModal = true;
+      } catch (err) {
+        alert('文件解析失败，请确保是有效的JSON文件');
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  }
+
+  function confirmImport() {
+    costumes = [...importPreview, ...costumes];
+    persist();
+    closeImportModal();
+  }
+
+  function closeImportModal() {
+    showImportModal = false;
+    importPreview = [];
+    importSkipped = [];
+    importFile = null;
+  }
+
   $: selected = costumes.find((item) => item.id === selectedId);
 
   function handleModalKeydown(e) {
     if (e.key === 'Escape') {
-      if (showDeleteConfirm) {
+      if (showImportModal) {
+        closeImportModal();
+      } else if (showDeleteConfirm) {
         cancelDelete();
-      } else {
+      } else if (selectedId) {
         closeDetail();
       }
     }
@@ -209,6 +282,20 @@
     </div>
   </section>
 
+  <section class="panel">
+    <h2>数据导入导出</h2>
+    <div class="import-export-btns">
+      <button type="button" class="secondary" on:click={exportCostumes}>
+        <Download size={16} />导出JSON
+      </button>
+      <label class="file-input-label">
+        <Upload size={16} />导入JSON
+        <input type="file" accept=".json" on:change={handleImportFile} hidden />
+      </label>
+    </div>
+    <p class="hint">导出当前所有服装档案为JSON文件，或从JSON文件导入新的服装记录。</p>
+  </section>
+
   {#if selected}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modal-overlay" role="presentation" on:click={closeDetail}>
@@ -289,6 +376,81 @@
       </div>
     </div>
   {/if}
+
+  {#if showImportModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay" role="presentation" on:click={closeImportModal}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal modal-wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="import-title"
+        on:click|stopPropagation
+        on:keydown={handleModalKeydown}
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h2 id="import-title">导入服装档案</h2>
+          <button type="button" class="icon-btn" on:click={closeImportModal} aria-label="关闭"><X size={20} /></button>
+        </div>
+
+        <div class="import-content">
+          <p class="file-info">文件：{importFile}</p>
+
+          {#if importPreview.length > 0}
+            <div class="import-summary success">
+              <CheckCircle size={18} />
+              <span>检测到 <strong>{importPreview.length}</strong> 条有效记录，将被导入</span>
+            </div>
+          {/if}
+
+          {#if importSkipped.length > 0}
+            <div class="import-summary warning">
+              <AlertTriangle size={18} />
+              <span>跳过 <strong>{importSkipped.length}</strong> 条无效记录（缺少服装名称或所属剧目）</span>
+            </div>
+          {/if}
+
+          {#if importPreview.length > 0}
+            <div class="preview-section">
+              <h3>即将导入的服装</h3>
+              <div class="preview-list">
+                {#each importPreview as item}
+                  <div class="preview-item">
+                    <strong>{item.name}</strong>
+                    <span>{item.play} · {item.size || '未填尺码'}</span>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          {#if importSkipped.length > 0}
+            <div class="preview-section">
+              <h3>已跳过的记录</h3>
+              <div class="skipped-list">
+                {#each importSkipped as item}
+                  <div class="skipped-item">
+                    <span class="skipped-index">第{item.index + 1}条</span>
+                    <span class="skipped-name">{item.name}</span>
+                    <span class="skipped-play">{item.play}</span>
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          <div class="modal-actions">
+            <button type="button" class="secondary" on:click={closeImportModal}>取消</button>
+            <button type="button" on:click={confirmImport} disabled={importPreview.length === 0}>
+              <Save size={16} />确认导入 {importPreview.length} 条
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -348,5 +510,27 @@
   .confirm-box p { margin: 0 0 18px; font-size: 15px; line-height: 1.6; color: #3b2f26; }
   .confirm-actions { display: flex; gap: 10px; justify-content: flex-end; flex-wrap: wrap; }
   .confirm-actions button { min-width: 100px; }
-  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } }
+  .import-export-btns { display: flex; gap: 10px; margin-bottom: 10px; }
+  .import-export-btns button, .import-export-btns .file-input-label { flex: 1; }
+  .file-input-label { display: inline-flex; align-items: center; justify-content: center; gap: 7px; padding: 11px 13px; border-radius: 8px; background: #603d2d; color: #fff; cursor: pointer; font: inherit; border: 0; }
+  .hint { margin: 0; font-size: 13px; color: #8a7665; line-height: 1.5; }
+  .modal-wide { max-width: 640px; }
+  .import-content { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 14px; }
+  .file-info { margin: 0; padding: 10px 14px; background: #f6efe7; border-radius: 8px; font-size: 14px; color: #4a3b30; }
+  .import-summary { display: flex; align-items: center; gap: 10px; padding: 12px 14px; border-radius: 8px; font-size: 14px; }
+  .import-summary.success { background: #eef6ee; color: #2d5a2d; }
+  .import-summary.warning { background: #fff4e6; color: #8a5a1a; }
+  .import-summary strong { font-weight: 600; }
+  .preview-section { display: flex; flex-direction: column; gap: 8px; }
+  .preview-section h3 { margin: 0; font-size: 15px; font-weight: 600; color: #3b2f26; }
+  .preview-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 8px; max-height: 200px; overflow-y: auto; padding: 8px; background: #faf6f2; border-radius: 8px; }
+  .preview-item { padding: 10px 12px; background: #fff; border: 1px solid #e4d8cc; border-radius: 6px; }
+  .preview-item strong { display: block; font-size: 14px; margin-bottom: 2px; }
+  .preview-item span { font-size: 12px; color: #6b5a4d; }
+  .skipped-list { display: flex; flex-direction: column; gap: 6px; max-height: 160px; overflow-y: auto; padding: 8px; background: #faf6f2; border-radius: 8px; }
+  .skipped-item { display: grid; grid-template-columns: 60px 1fr 1fr; gap: 10px; padding: 8px 12px; background: #fff; border: 1px dashed #e0c9b8; border-radius: 6px; font-size: 13px; align-items: center; }
+  .skipped-index { color: #b84a3b; font-weight: 500; }
+  .skipped-name, .skipped-play { color: #6b5a4d; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } }
 </style>
