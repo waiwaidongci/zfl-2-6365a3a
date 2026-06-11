@@ -1,6 +1,6 @@
 <script>
   import { onMount } from 'svelte';
-  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays } from 'lucide-svelte';
+  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal } from 'lucide-svelte';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -20,8 +20,14 @@
     { id: crypto.randomUUID(), costumeId: seed[1].id, costumeName: seed[1].name, play: seed[1].play, date: iso(10), type: '场次', reservedFor: '第三幕联排', createdAt: new Date().toISOString(), status: 'active', note: '' }
   ];
 
+  const seedWorkOrders = [
+    { id: crypto.randomUUID(), type: '清洗', costumeId: seed[1].id, costumeName: seed[1].name, play: seed[1].play, status: '待清洗', assignee: '张阿姨', dueDate: iso(2), note: '袖口有明显污渍，需要重点处理', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
+    { id: crypto.randomUUID(), type: '维修', costumeId: seed[0].id, costumeName: seed[0].name, play: seed[0].play, status: '维修中', assignee: '李师傅', dueDate: iso(5), note: '领口脱线，需要缝补', createdAt: new Date(Date.now() - 86400000).toISOString(), updatedAt: new Date().toISOString() }
+  ];
+
   let costumes = seed;
   let reservations = seedReservations;
+  let workOrders = seedWorkOrders;
   let query = '';
   let playFilter = '全部剧目';
   let showOverdue = false;
@@ -41,6 +47,24 @@
   let reservationForm = { date: iso(1), type: '演员', reservedFor: '', note: '' };
   let reservationQuery = '';
   let reservationFilter = '全部';
+  let workOrderQuery = '';
+  let workOrderFilter = '全部';
+  let workOrderTypeFilter = '全部';
+  let showWorkOrderModal = false;
+  let editingWorkOrderId = null;
+  let selectedWorkOrderId = null;
+  let creatingWorkOrder = false;
+  let workOrderCostumeId = null;
+  let workOrderForm = {
+    type: '清洗',
+    costumeId: '',
+    costumeName: '',
+    play: '',
+    status: '待清洗',
+    assignee: '',
+    dueDate: iso(3),
+    note: ''
+  };
 
   onMount(() => {
     const stored = localStorage.getItem('zfl-2-costumes');
@@ -49,6 +73,8 @@
     if (storedRecords) records = JSON.parse(storedRecords);
     const storedReservations = localStorage.getItem('zfl-2-reservations');
     if (storedReservations) reservations = JSON.parse(storedReservations);
+    const storedWorkOrders = localStorage.getItem('zfl-2-work-orders');
+    if (storedWorkOrders) workOrders = JSON.parse(storedWorkOrders);
   });
 
   let localStorageAvailable = typeof localStorage !== 'undefined';
@@ -71,6 +97,16 @@
     }
   }
 
+  function persistWorkOrders() {
+    if (localStorageAvailable) {
+      localStorage.setItem('zfl-2-work-orders', JSON.stringify(workOrders));
+    }
+  }
+
+  function getActiveWorkOrder(costumeId) {
+    return workOrders.find((wo) => wo.costumeId === costumeId && (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中'));
+  }
+
   function checkConflict(costumeId, date, excludeId = null) {
     const costume = costumes.find((c) => c.id === costumeId);
     const conflicts = [];
@@ -89,6 +125,10 @@
         conflicts.push({ type: '借出', detail: `${costume.borrower}借用中，归还时间不确定` });
       }
     }
+    const activeWorkOrder = getActiveWorkOrder(costumeId);
+    if (activeWorkOrder) {
+      conflicts.push({ type: activeWorkOrder.type, detail: `${activeWorkOrder.type}中，负责人：${activeWorkOrder.assignee || '未分配'}，预计完成：${activeWorkOrder.dueDate}` });
+    }
     reservations.forEach((r) => {
       if (r.status !== 'active') return;
       if (excludeId && r.id === excludeId) return;
@@ -97,6 +137,240 @@
       }
     });
     return conflicts;
+  }
+
+  function createWorkOrder(type, costume, assignee = '', note = '') {
+    const initialStatus = type === '清洗' ? '待清洗' : '待维修';
+    const workOrder = {
+      id: crypto.randomUUID(),
+      type,
+      costumeId: costume.id,
+      costumeName: costume.name,
+      play: costume.play,
+      status: initialStatus,
+      assignee: assignee || (type === '清洗' ? '张阿姨' : '李师傅'),
+      dueDate: iso(type === '清洗' ? 2 : 5),
+      note,
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString()
+    };
+    workOrders = [workOrder, ...workOrders];
+    persistWorkOrders();
+    addRecord('工单创建', costume, '系统', `创建${type}工单「${workOrder.id.slice(0, 8)}」，状态：${initialStatus}，负责人：${workOrder.assignee}`);
+
+    if (type === '清洗') {
+      const costumeToUpdate = costumes.find((c) => c.id === costume.id);
+      if (costumeToUpdate && costumeToUpdate.clean !== '待清洗') {
+        costumes = costumes.map((c) => c.id === costume.id ? { ...c, clean: '待清洗' } : c);
+        persist();
+        addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」清洗状态变更为「待清洗」`);
+      }
+    } else if (type === '维修') {
+      const costumeToUpdate = costumes.find((c) => c.id === costume.id);
+      if (costumeToUpdate && costumeToUpdate.clean !== '维修中') {
+        costumes = costumes.map((c) => c.id === costume.id ? { ...c, clean: '维修中' } : c);
+        persist();
+        addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」状态变更为「维修中」`);
+      }
+    }
+
+    return workOrder;
+  }
+
+  function updateWorkOrderStatus(id, newStatus) {
+    const workOrder = workOrders.find((wo) => wo.id === id);
+    if (!workOrder) return;
+    const costume = { name: workOrder.costumeName, play: workOrder.play };
+    workOrders = workOrders.map((wo) => wo.id === id ? { ...wo, status: newStatus, updatedAt: new Date().toISOString() } : wo);
+    persistWorkOrders();
+    addRecord('工单更新', costume, '系统', `工单「${id.slice(0, 8)}」状态从「${workOrder.status}」变更为「${newStatus}」`);
+
+    if (newStatus === '已完成' && workOrder.type === '清洗') {
+      const costumeToUpdate = costumes.find((c) => c.id === workOrder.costumeId);
+      if (costumeToUpdate && costumeToUpdate.clean === '待清洗') {
+        costumes = costumes.map((c) => c.id === workOrder.costumeId ? { ...c, clean: '已清洗' } : c);
+        persist();
+        addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」清洗状态从「待清洗」变更为「已清洗」`);
+      }
+    }
+
+    if (newStatus === '已完成' && workOrder.type === '维修') {
+      const costumeToUpdate = costumes.find((c) => c.id === workOrder.costumeId);
+      if (costumeToUpdate && costumeToUpdate.clean === '维修中') {
+        costumes = costumes.map((c) => c.id === workOrder.costumeId ? { ...c, clean: '已清洗' } : c);
+        persist();
+        addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」维修完成，状态变更为「已清洗」`);
+      }
+    }
+
+    if (newStatus === '已取消') {
+      const costumeToUpdate = costumes.find((c) => c.id === workOrder.costumeId);
+      if (costumeToUpdate) {
+        const otherActiveWO = workOrders.find((wo) => wo.costumeId === workOrder.costumeId && wo.id !== id && (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中'));
+        if (!otherActiveWO) {
+          let newCleanStatus = '已清洗';
+          if (costumeToUpdate.clean === '待清洗' || costumeToUpdate.clean === '维修中') {
+            newCleanStatus = '已清洗';
+          }
+          costumes = costumes.map((c) => c.id === workOrder.costumeId ? { ...c, clean: newCleanStatus } : c);
+          persist();
+          addRecord('清洗', costumeToUpdate, '系统', `工单取消，「${costumeToUpdate.name}」状态变更为「${newCleanStatus}」`);
+        }
+      }
+    }
+  }
+
+  function openCreateWorkOrder(costumeId = null, type = '维修') {
+    creatingWorkOrder = true;
+    editingWorkOrderId = null;
+    const initialStatus = type === '清洗' ? '待清洗' : '待维修';
+    if (costumeId) {
+      const costume = costumes.find((c) => c.id === costumeId);
+      if (costume) {
+        workOrderForm = {
+          type,
+          costumeId: costume.id,
+          costumeName: costume.name,
+          play: costume.play,
+          status: initialStatus,
+          assignee: type === '清洗' ? '张阿姨' : '李师傅',
+          dueDate: iso(type === '清洗' ? 2 : 5),
+          note: ''
+        };
+      }
+    } else {
+      workOrderForm = {
+        type,
+        costumeId: '',
+        costumeName: '',
+        play: '',
+        status: initialStatus,
+        assignee: type === '清洗' ? '张阿姨' : '李师傅',
+        dueDate: iso(type === '清洗' ? 2 : 5),
+        note: ''
+      };
+    }
+    showWorkOrderModal = true;
+  }
+
+  function openEditWorkOrder(id) {
+    const workOrder = workOrders.find((wo) => wo.id === id);
+    if (!workOrder) return;
+    creatingWorkOrder = false;
+    editingWorkOrderId = id;
+    workOrderForm = { ...workOrder };
+    showWorkOrderModal = true;
+  }
+
+  function closeWorkOrderModal() {
+    showWorkOrderModal = false;
+    creatingWorkOrder = false;
+    editingWorkOrderId = null;
+    selectedWorkOrderId = null;
+  }
+
+  function saveWorkOrder() {
+    if (!workOrderForm.costumeId || !workOrderForm.assignee.trim()) return;
+
+    if (creatingWorkOrder) {
+      const costume = costumes.find((c) => c.id === workOrderForm.costumeId);
+      if (!costume) return;
+      const workOrder = {
+        id: crypto.randomUUID(),
+        ...workOrderForm,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+      workOrders = [workOrder, ...workOrders];
+      persistWorkOrders();
+      addRecord('工单创建', costume, '系统', `创建${workOrder.type}工单「${workOrder.id.slice(0, 8)}」，状态：${workOrder.status}，负责人：${workOrder.assignee}`);
+
+      if (workOrder.type === '清洗' && (workOrder.status === '待清洗' || workOrder.status === '清洗中')) {
+        costumes = costumes.map((c) => c.id === costume.id ? { ...c, clean: '待清洗' } : c);
+        persist();
+        addRecord('清洗', costume, '系统', `「${costume.name}」清洗状态变更为「待清洗」`);
+      } else if (workOrder.type === '维修' && (workOrder.status === '待维修' || workOrder.status === '维修中')) {
+        costumes = costumes.map((c) => c.id === costume.id ? { ...c, clean: '维修中' } : c);
+        persist();
+        addRecord('清洗', costume, '系统', `「${costume.name}」状态变更为「维修中」`);
+      }
+    } else if (editingWorkOrderId) {
+      const oldWorkOrder = workOrders.find((wo) => wo.id === editingWorkOrderId);
+      if (oldWorkOrder && oldWorkOrder.status !== workOrderForm.status) {
+        const costume = { name: oldWorkOrder.costumeName, play: oldWorkOrder.play };
+        addRecord('工单更新', costume, '系统', `工单「${editingWorkOrderId.slice(0, 8)}」状态从「${oldWorkOrder.status}」变更为「${workOrderForm.status}」`);
+      }
+      workOrders = workOrders.map((wo) => wo.id === editingWorkOrderId ? { ...wo, ...workOrderForm, updatedAt: new Date().toISOString() } : wo);
+      persistWorkOrders();
+
+      if (workOrderForm.status === '已完成' && workOrderForm.type === '清洗') {
+        const costumeToUpdate = costumes.find((c) => c.id === workOrderForm.costumeId);
+        if (costumeToUpdate && costumeToUpdate.clean === '待清洗') {
+          costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '已清洗' } : c);
+          persist();
+          addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」清洗状态从「待清洗」变更为「已清洗」`);
+        }
+      }
+
+      if (workOrderForm.status === '已完成' && workOrderForm.type === '维修') {
+        const costumeToUpdate = costumes.find((c) => c.id === workOrderForm.costumeId);
+        if (costumeToUpdate && costumeToUpdate.clean === '维修中') {
+          costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '已清洗' } : c);
+          persist();
+          addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」维修完成，状态变更为「已清洗」`);
+        }
+      }
+
+      if ((workOrderForm.status === '待清洗' || workOrderForm.status === '清洗中') && workOrderForm.type === '清洗') {
+        const costumeToUpdate = costumes.find((c) => c.id === workOrderForm.costumeId);
+        if (costumeToUpdate && costumeToUpdate.clean !== '待清洗') {
+          costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '待清洗' } : c);
+          persist();
+          addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」清洗状态变更为「待清洗」`);
+        }
+      }
+
+      if ((workOrderForm.status === '待维修' || workOrderForm.status === '维修中') && workOrderForm.type === '维修') {
+        const costumeToUpdate = costumes.find((c) => c.id === workOrderForm.costumeId);
+        if (costumeToUpdate && costumeToUpdate.clean !== '维修中') {
+          costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '维修中' } : c);
+          persist();
+          addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」状态变更为「维修中」`);
+        }
+      }
+
+      if (workOrderForm.status === '已取消') {
+        const costumeToUpdate = costumes.find((c) => c.id === workOrderForm.costumeId);
+        if (costumeToUpdate) {
+          const otherActiveWO = workOrders.find((wo) => wo.costumeId === workOrderForm.costumeId && wo.id !== editingWorkOrderId && (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中'));
+          if (!otherActiveWO) {
+            costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '已清洗' } : c);
+            persist();
+            addRecord('清洗', costumeToUpdate, '系统', `工单取消，「${costumeToUpdate.name}」状态变更为「已清洗」`);
+          }
+        }
+      }
+    }
+    closeWorkOrderModal();
+  }
+
+  function openWorkOrderDetail(id) {
+    selectedWorkOrderId = id;
+  }
+
+  function closeWorkOrderDetail() {
+    selectedWorkOrderId = null;
+  }
+
+  function getAvailableStatuses(workOrder) {
+    if (workOrder.type === '清洗') {
+      if (workOrder.status === '待清洗') return ['待清洗', '清洗中', '已完成', '已取消'];
+      if (workOrder.status === '清洗中') return ['清洗中', '已完成', '已取消'];
+    } else {
+      if (workOrder.status === '待维修') return ['待维修', '维修中', '已完成', '已取消'];
+      if (workOrder.status === '维修中') return ['维修中', '已完成', '已取消'];
+    }
+    return [workOrder.status];
   }
 
   function getUpcomingReservations(costumeId) {
@@ -193,6 +467,29 @@
   $: borrowedCount = costumes.filter((item) => item.status === '借出').length;
   $: cleanWaitCount = costumes.filter((item) => item.clean === '待清洗').length;
   $: activeReservationCount = reservations.filter((r) => r.status === 'active').length;
+  $: pendingWorkOrderCount = workOrders.filter((wo) => wo.status === '待清洗' || wo.status === '待维修').length;
+  $: inProgressWorkOrderCount = workOrders.filter((wo) => wo.status === '清洗中' || wo.status === '维修中').length;
+  $: completedWorkOrderCount = workOrders.filter((wo) => wo.status === '已完成').length;
+  $: overdueWorkOrderCount = workOrders.filter((wo) => (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中') && wo.dueDate && new Date(wo.dueDate) < new Date(iso(0))).length;
+  $: filteredWorkOrders = workOrders.filter((wo) => {
+    const text = `${wo.costumeName}${wo.play}${wo.assignee}`;
+    const matchesQuery = text.includes(workOrderQuery.trim());
+    let matchesFilter = true;
+    if (workOrderFilter === '待处理') matchesFilter = wo.status === '待清洗' || wo.status === '待维修';
+    else if (workOrderFilter === '处理中') matchesFilter = wo.status === '清洗中' || wo.status === '维修中';
+    else if (workOrderFilter === '已完成') matchesFilter = wo.status === '已完成';
+    else if (workOrderFilter === '已取消') matchesFilter = wo.status === '已取消';
+    else if (workOrderFilter === '已逾期') matchesFilter = (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中') && wo.dueDate && new Date(wo.dueDate) < new Date(iso(0));
+    let matchesTypeFilter = true;
+    if (workOrderTypeFilter === '清洗') matchesTypeFilter = wo.type === '清洗';
+    else if (workOrderTypeFilter === '维修') matchesTypeFilter = wo.type === '维修';
+    return matchesQuery && matchesFilter && matchesTypeFilter;
+  }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  $: availableCostumesForWorkOrder = costumes.filter((c) => {
+    const activeWO = getActiveWorkOrder(c.id);
+    return !activeWO && c.status === '在库';
+  });
+  $: selectedWorkOrder = workOrders.find((wo) => wo.id === selectedWorkOrderId);
   $: filteredReservations = reservations.filter((r) => {
     const text = `${r.costumeName}${r.play}${r.reservedFor}`;
     const matchesQuery = text.includes(reservationQuery.trim());
@@ -231,6 +528,11 @@
     if (!borrower) return;
     const costume = costumes.find((c) => c.id === lendingId);
     if (!costume) return;
+    const activeWorkOrder = getActiveWorkOrder(lendingId);
+    if (activeWorkOrder) {
+      alert(`该服装当前${activeWorkOrder.type}中，无法借出。请先完成${activeWorkOrder.type}工单。`);
+      return;
+    }
     const dueDate = iso(7);
     costumes = costumes.map((c) => c.id === lendingId ? { ...c, borrower, due: dueDate, status: '借出' } : c);
     persist();
@@ -245,6 +547,7 @@
     costumes = costumes.map((c) => c.id === id ? { ...c, borrower: '', due: '', status: '在库', clean: '待清洗' } : c);
     persist();
     addRecord('归还', costume, borrower, `${borrower}归还「${costume.name}」，状态变更为待清洗`);
+    createWorkOrder('清洗', costume, '张阿姨', `${borrower}归还后自动生成清洗工单`);
   }
 
   function updateClean(id, clean) {
@@ -375,6 +678,10 @@
         closeImportModal();
       } else if (showDeleteConfirm) {
         cancelDelete();
+      } else if (showWorkOrderModal) {
+        closeWorkOrderModal();
+      } else if (selectedWorkOrderId) {
+        closeWorkOrderDetail();
       } else if (selectedId) {
         closeDetail();
       }
@@ -393,9 +700,45 @@
       <b><Clock size={18} />{borrowedCount}件借出</b>
       <b><CalendarDays size={18} />{activeReservationCount}个预约</b>
       <b><Archive size={18} />{cleanWaitCount}件待清洗</b>
-      <b class:danger={overdueCount > 0}>{overdueCount}件逾期</b>
+      <b class:danger={overdueCount > 0}><AlertTriangle size={18} />{overdueCount}项逾期</b>
     </div>
   </header>
+
+  <section class="workorder-stats">
+    <div class="stats-panel">
+      <div class="stats-title">工单总览</div>
+      <div class="stats-grid">
+        <div class="stat-card stat-pending">
+          <div class="stat-icon"><Droplets size={24} /></div>
+          <div class="stat-content">
+            <div class="stat-number">{pendingWorkOrderCount}</div>
+            <div class="stat-label">待处理工单</div>
+          </div>
+        </div>
+        <div class="stat-card stat-progress">
+          <div class="stat-icon"><Wrench size={24} /></div>
+          <div class="stat-content">
+            <div class="stat-number">{inProgressWorkOrderCount}</div>
+            <div class="stat-label">处理中</div>
+          </div>
+        </div>
+        <div class="stat-card stat-done">
+          <div class="stat-icon"><CheckCircle size={24} /></div>
+          <div class="stat-content">
+            <div class="stat-number">{completedWorkOrderCount}</div>
+            <div class="stat-label">已完成</div>
+          </div>
+        </div>
+        <div class="stat-card stat-overdue" class:has-overdue={overdueWorkOrderCount > 0}>
+          <div class="stat-icon"><AlertTriangle size={24} /></div>
+          <div class="stat-content">
+            <div class="stat-number">{overdueWorkOrderCount}</div>
+            <div class="stat-label">逾期工单</div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
 
   <section class="layout">
     <form class="panel" on:submit|preventDefault={saveCostume}>
@@ -429,8 +772,10 @@
       <div class="cards">
         {#each filtered as item}
           {@const latestRes = getLatestReservation(item.id)}
+          {@const activeWO = getActiveWorkOrder(item.id)}
           <article
             class:item-overdue={item.status === '借出' && item.due && new Date(item.due) < new Date(iso(0))}
+            class:item-in-workorder={activeWO}
             class="card-clickable"
           >
             <button
@@ -445,6 +790,16 @@
             </div>
             <p>{item.location} · {item.clean}</p>
             <p>{item.status === '借出' ? `${item.borrower}借用至${item.due}` : '当前在库'}</p>
+            {#if activeWO}
+              <p class="workorder-info">
+                {#if activeWO.type === '清洗'}
+                  <Droplets size={13} />
+                {:else}
+                  <Wrench size={13} />
+                {/if}
+                {activeWO.type}中：{activeWO.status} · 负责人：{activeWO.assignee}
+              </p>
+            {/if}
             {#if latestRes}
               <p class="reservation-info">
                 <Calendar size={13} />下次预约：{latestRes.date} · {latestRes.type === '演员' ? '演员' : '场次'}：{latestRes.reservedFor}
@@ -453,11 +808,18 @@
             <div class="actions" role="group" aria-label="服装操作">
               {#if item.status === '借出'}
                 <button type="button" on:click={() => returnBack(item.id)}><Undo2 size={16} />归还</button>
+              {:else if activeWO}
+                <button type="button" disabled><Clock size={16} />{activeWO.type}中</button>
               {:else}
                 <button type="button" on:click={() => openLend(item.id)}><Clock size={16} />借出</button>
               {/if}
               <button type="button" class="secondary" on:click={() => openReserve(item.id)}><Calendar size={16} />预约</button>
-              <button type="button" class="secondary" on:click={() => updateClean(item.id, item.clean === '已清洗' ? '待清洗' : '已清洗')}><CheckCircle2 size={16} />{item.clean === '已清洗' ? '标待洗' : '标已洗'}</button>
+              {#if !activeWO && item.status === '在库'}
+                <button type="button" class="secondary" on:click={() => openCreateWorkOrder(item.id, '维修')}><Wrench size={16} />报修</button>
+              {/if}
+              {#if activeWO}
+                <button type="button" class="secondary" on:click={() => openWorkOrderDetail(activeWO.id)}><Eye size={16} />查看工单</button>
+              {/if}
             </div>
           </article>
         {/each}
@@ -489,6 +851,90 @@
       </label>
     </div>
     <p class="hint">导出当前所有服装档案为JSON文件，或从JSON文件导入新的服装记录。</p>
+  </section>
+
+  <section class="panel">
+    <div class="record-header">
+      <h2><Wrench size={18} />清洗与维修工单</h2>
+      <div style="display: flex; gap: 10px; align-items: center;">
+        <span class="record-count">共 {filteredWorkOrders.length} 条</span>
+        <button type="button" class="small-btn" on:click={() => openCreateWorkOrder(null, '维修')}>
+          <Plus size={14} />新建工单
+        </button>
+      </div>
+    </div>
+    <div class="record-toolbar">
+      <label><Search size={16} /><input bind:value={workOrderQuery} placeholder="搜索服装/剧目/负责人" /></label>
+      <div style="display: flex; gap: 8px;">
+        <select bind:value={workOrderTypeFilter}>
+          <option>全部</option>
+          <option>清洗</option>
+          <option>维修</option>
+        </select>
+        <select bind:value={workOrderFilter}>
+          <option>全部</option>
+          <option>待处理</option>
+          <option>处理中</option>
+          <option>已完成</option>
+          <option>已取消</option>
+          <option>已逾期</option>
+        </select>
+      </div>
+    </div>
+    <div class="record-list">
+      {#each filteredWorkOrders as workOrder}
+        {@const isOverdue = (workOrder.status === '待清洗' || workOrder.status === '清洗中' || workOrder.status === '待维修' || workOrder.status === '维修中') && workOrder.dueDate && new Date(workOrder.dueDate) < new Date(iso(0))}
+        <div class="record-item" class:record-cancelled={workOrder.status === '已取消'} class:record-overdue={isOverdue}>
+          <div class="record-type-badge record-type-{workOrder.type}">
+            {#if workOrder.type === '清洗'}
+              <Droplets size={14} />
+            {:else}
+              <Wrench size={14} />
+            {/if}
+            {workOrder.type}
+          </div>
+          <div class="record-content">
+            <div class="record-title-row">
+              <strong class="record-name">{workOrder.costumeName}</strong>
+              <span class="record-play-tag">{workOrder.play}</span>
+              <span class="record-play-tag reservation-date-tag"><Calendar size={12} />截止：{workOrder.dueDate}</span>
+              <span class="record-play-tag" style="background: {workOrder.status === '已完成' ? '#e6f0e6' : workOrder.status === '已取消' ? '#f6e6e6' : isOverdue ? '#fff4e6' : '#e6eef6'}; color: {workOrder.status === '已完成' ? '#2d5a2d' : workOrder.status === '已取消' ? '#8a2d2d' : isOverdue ? '#8a5a1a' : '#1a4a8a'};">
+                {workOrder.status}
+              </span>
+            </div>
+            <p class="record-summary">
+              负责人：{workOrder.assignee || '未分配'}
+              {#if workOrder.note} · 备注：{workOrder.note}{/if}
+            </p>
+            <div class="record-footer">
+              <span class="record-operator">创建时间：{formatTime(workOrder.createdAt)}</span>
+              <div style="display: flex; gap: 6px;">
+                {#if workOrder.status !== '已完成' && workOrder.status !== '已取消'}
+                  {#each getAvailableStatuses(workOrder).filter((s) => s !== workOrder.status) as status}
+                    <button type="button" class="small-btn" on:click={() => updateWorkOrderStatus(workOrder.id, status)}>
+                      {status}
+                    </button>
+                  {/each}
+                {/if}
+                <button type="button" class="secondary small-btn" on:click={() => openEditWorkOrder(workOrder.id)}>
+                  <Save size={12} />编辑
+                </button>
+                <button type="button" class="secondary small-btn" on:click={() => openWorkOrderDetail(workOrder.id)}>
+                  <Eye size={12} />详情
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      {/each}
+      {#if filteredWorkOrders.length === 0}
+        <div class="record-empty">
+          <Wrench size={32} />
+          <p>暂无工单</p>
+          <span>服装归还时将自动生成清洗工单，或点击「新建工单」创建维修工单</span>
+        </div>
+      {/if}
+    </div>
   </section>
 
   <section class="panel">
@@ -576,6 +1022,10 @@
               <Calendar size={14} />
             {:else if record.type === '取消预约'}
               <XCircle size={14} />
+            {:else if record.type === '工单创建'}
+              <Plus size={14} />
+            {:else if record.type === '工单更新'}
+              <Wrench size={14} />
             {/if}
             {record.type}
           </div>
@@ -861,6 +1311,158 @@
       </div>
     </div>
   {/if}
+
+  {#if showWorkOrderModal}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay" role="presentation" on:click={closeWorkOrderModal}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workorder-title"
+        on:click|stopPropagation
+        on:keydown={handleModalKeydown}
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h2 id="workorder-title">
+            {creatingWorkOrder ? '新建工单' : '编辑工单'}
+          </h2>
+          <button type="button" class="icon-btn" on:click={closeWorkOrderModal} aria-label="关闭"><X size={20} /></button>
+        </div>
+        <form class="lend-form" on:submit|preventDefault={saveWorkOrder}>
+          <label>
+            <span>工单类型</span>
+            <select bind:value={workOrderForm.type} disabled={!creatingWorkOrder} on:change={() => {
+              if (workOrderForm.type === '清洗') {
+                workOrderForm.status = workOrderForm.status === '维修中' ? '清洗中' : '待清洗';
+                if (!workOrderForm.assignee) workOrderForm.assignee = '张阿姨';
+              } else {
+                workOrderForm.status = workOrderForm.status === '清洗中' ? '维修中' : '待维修';
+                if (!workOrderForm.assignee) workOrderForm.assignee = '李师傅';
+              }
+            }}>
+              <option value="清洗">清洗</option>
+              <option value="维修">维修</option>
+            </select>
+          </label>
+          <label>
+            <span>选择服装</span>
+            <select bind:value={workOrderForm.costumeId} disabled={!creatingWorkOrder} on:change={() => {
+              const c = costumes.find((cost) => cost.id === workOrderForm.costumeId);
+              if (c) {
+                workOrderForm.costumeName = c.name;
+                workOrderForm.play = c.play;
+              }
+            }}>
+              <option value="">请选择服装</option>
+              {#each availableCostumesForWorkOrder as costume}
+                <option value={costume.id}>{costume.name} ({costume.play})</option>
+              {/each}
+            </select>
+          </label>
+          {#if workOrderForm.costumeId}
+            <div class="status-info">
+              <p><strong>服装：</strong>{workOrderForm.costumeName}</p>
+              <p><strong>剧目：</strong>{workOrderForm.play}</p>
+            </div>
+          {/if}
+          <label>
+            <span>当前状态</span>
+            <select bind:value={workOrderForm.status}>
+              {#each getAvailableStatuses(workOrderForm) as status}
+                <option>{status}</option>
+              {/each}
+            </select>
+          </label>
+          <label>
+            <span>负责人</span>
+            <input bind:value={workOrderForm.assignee} placeholder="请输入负责人姓名" required />
+          </label>
+          <label>
+            <span>截止日期</span>
+            <input type="date" bind:value={workOrderForm.dueDate} required />
+          </label>
+          <label>
+            <span>备注</span>
+            <input bind:value={workOrderForm.note} placeholder="选填，描述问题或特殊要求" />
+          </label>
+          <div class="modal-actions">
+            <button type="button" class="secondary" on:click={closeWorkOrderModal}>取消</button>
+            <button type="submit" disabled={!workOrderForm.costumeId || !workOrderForm.assignee.trim()}>
+              <Save size={16} />{creatingWorkOrder ? '创建工单' : '保存修改'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  {/if}
+
+  {#if selectedWorkOrder}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay" role="presentation" on:click={closeWorkOrderDetail}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="workorder-detail-title"
+        on:click|stopPropagation
+        on:keydown={handleModalKeydown}
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h2 id="workorder-detail-title">工单详情</h2>
+          <button type="button" class="icon-btn" on:click={closeWorkOrderDetail} aria-label="关闭"><X size={20} /></button>
+        </div>
+        <div class="detail-form">
+          <div class="status-info">
+            <p><strong>工单编号：</strong>{selectedWorkOrder.id.slice(0, 8)}</p>
+            <p><strong>工单类型：</strong>{selectedWorkOrder.type}</p>
+            <p><strong>当前状态：</strong>{selectedWorkOrder.status}</p>
+          </div>
+          <div class="status-info">
+            <p><strong>服装：</strong>{selectedWorkOrder.costumeName}</p>
+            <p><strong>剧目：</strong>{selectedWorkOrder.play}</p>
+          </div>
+          <div class="status-info">
+            <p><strong>负责人：</strong>{selectedWorkOrder.assignee || '未分配'}</p>
+            <p><strong>截止日期：</strong>{selectedWorkOrder.dueDate}</p>
+            <p><strong>创建时间：</strong>{formatTime(selectedWorkOrder.createdAt)}</p>
+            <p><strong>更新时间：</strong>{formatTime(selectedWorkOrder.updatedAt)}</p>
+          </div>
+          {#if selectedWorkOrder.note}
+            <div class="status-info">
+              <p><strong>备注：</strong>{selectedWorkOrder.note}</p>
+            </div>
+          {/if}
+
+          {#if selectedWorkOrder.status !== '已完成' && selectedWorkOrder.status !== '已取消'}
+            <div class="status-info">
+              <p style="margin-bottom: 8px;"><strong>状态流转：</strong></p>
+              <div style="display: flex; gap: 8px; flex-wrap: wrap;">
+                {#each getAvailableStatuses(selectedWorkOrder).filter((s) => s !== selectedWorkOrder.status) as status}
+                  <button type="button" on:click={() => updateWorkOrderStatus(selectedWorkOrder.id, status)}>
+                    {status}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          {/if}
+
+          <div class="modal-actions">
+            <button type="button" class="secondary" on:click={() => { closeWorkOrderDetail(); openEditWorkOrder(selectedWorkOrder.id); }}>
+              <Save size={16} />编辑工单
+            </button>
+            <button type="button" on:click={closeWorkOrderDetail}>
+              关闭
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  {/if}
 </main>
 
 <style>
@@ -875,6 +1477,21 @@
   .stats { display: flex; flex-wrap: wrap; gap: 10px; }
   .stats b { display: inline-flex; align-items: center; gap: 7px; padding: 10px 12px; border: 1px solid rgb(255 255 255 / .22); border-radius: 8px; background: rgb(255 255 255 / .12); }
   .danger { color: #ffd0c2; }
+  .workorder-stats { margin: 16px 0; }
+  .stats-panel { background: #fff; border: 1px solid #e4d8cc; border-radius: 8px; padding: 20px; box-shadow: 0 12px 30px rgb(62 42 24 / .08); }
+  .stats-title { font-size: 16px; font-weight: 600; color: #3b2f26; margin-bottom: 16px; display: flex; align-items: center; gap: 8px; }
+  .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; }
+  .stat-card { display: flex; align-items: center; gap: 14px; padding: 16px; border-radius: 10px; border: 1px solid #eadfd4; background: #fffaf5; transition: transform .15s ease, box-shadow .15s ease; }
+  .stat-card:hover { transform: translateY(-2px); box-shadow: 0 6px 18px rgb(62 42 24 / .1); }
+  .stat-icon { width: 48px; height: 48px; border-radius: 10px; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
+  .stat-pending .stat-icon { background: #e6eef6; color: #1a4a8a; }
+  .stat-progress .stat-icon { background: #fff4e6; color: #8a5a1a; }
+  .stat-done .stat-icon { background: #e6f0e6; color: #2d5a2d; }
+  .stat-overdue .stat-icon { background: #f6e6e6; color: #8a2d2d; }
+  .stat-overdue.has-overdue { border-color: #d98664; background: #fff5ef; }
+  .stat-content { flex: 1; }
+  .stat-number { font-size: 28px; font-weight: 700; color: #26211c; line-height: 1; }
+  .stat-label { font-size: 13px; color: #6b5a4d; margin-top: 4px; }
   .layout { display: grid; grid-template-columns: 340px 1fr; gap: 16px; margin: 16px 0; align-items: start; }
   .panel { background: #fff; border: 1px solid #e4d8cc; border-radius: 8px; padding: 18px; box-shadow: 0 12px 30px rgb(62 42 24 / .08); }
   form.panel { display: flex; flex-direction: column; gap: 10px; }
@@ -958,6 +1575,11 @@
   .record-type-预约 { background: #e6eef6; color: #1a4a8a; }
   .record-type-取消预约 { background: #f6e6e6; color: #8a2d2d; }
   .record-type-已过期 { background: #fff4e6; color: #8a5a1a; }
+  .record-type-工单创建 { background: #e6f0f6; color: #1a5a8a; }
+  .record-type-工单更新 { background: #fff4e6; color: #8a5a1a; }
+  .record-type-维修 { background: #f6e6e6; color: #8a1a2d; }
+  .item-in-workorder { border-color: #c9a67e; background: #fff8f0; }
+  .workorder-info { display: inline-flex; align-items: center; gap: 4px; margin: 4px 0 0; padding: 4px 10px; background: #fff4e6; color: #8a5a1a; border-radius: 6px; font-size: 12px; }
   .record-content { flex: 1; min-width: 0; }
   .record-title-row { display: flex; align-items: center; gap: 10px; margin-bottom: 6px; flex-wrap: wrap; }
   .record-name { font-size: 15px; color: #26211c; }
@@ -978,5 +1600,5 @@
   .conflict-box { background: #fff4e6; border: 1px solid #e0c9a8; border-radius: 8px; padding: 12px 14px; }
   .conflict-title { display: flex; align-items: center; gap: 8px; color: #8a5a1a; margin-bottom: 8px; }
   .conflict-item { margin: 2px 0; font-size: 13px; color: #6b4a2a; }
-  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar, .record-toolbar { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } .record-item { flex-direction: column; } .record-footer { flex-direction: column; align-items: flex-start; } }
+  @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar, .record-toolbar { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } .record-item { flex-direction: column; } .record-footer { flex-direction: column; align-items: flex-start; } .stats-grid { grid-template-columns: repeat(2, 1fr); } .stat-number { font-size: 22px; } .stat-card { padding: 12px; gap: 10px; } .stat-icon { width: 40px; height: 40px; } }
 </style>
