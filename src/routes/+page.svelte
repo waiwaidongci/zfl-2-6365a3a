@@ -29,6 +29,8 @@
   let importFile = null;
   let records = [];
   let recordQuery = '';
+  let lendingId = null;
+  let lendingBorrower = '';
 
   onMount(() => {
     const stored = localStorage.getItem('zfl-2-costumes');
@@ -99,15 +101,26 @@
     form = { name: '', size: '', play: '', location: '', clean: '已清洗', borrower: '', due: '', status: '在库', note: '' };
   }
 
-  function lend(id) {
-    const borrower = prompt('借出给谁？');
+  function openLend(id) {
+    lendingId = id;
+    lendingBorrower = '';
+  }
+
+  function closeLend() {
+    lendingId = null;
+    lendingBorrower = '';
+  }
+
+  function confirmLend() {
+    const borrower = lendingBorrower.trim();
     if (!borrower) return;
-    const costume = costumes.find((c) => c.id === id);
+    const costume = costumes.find((c) => c.id === lendingId);
     if (!costume) return;
     const dueDate = iso(7);
-    costumes = costumes.map((c) => c.id === id ? { ...c, borrower, due: dueDate, status: '借出' } : c);
+    costumes = costumes.map((c) => c.id === lendingId ? { ...c, borrower, due: dueDate, status: '借出' } : c);
     persist();
     addRecord('借出', costume, borrower, `借出「${costume.name}」给${borrower}，应还日期：${dueDate}`);
+    closeLend();
   }
 
   function returnBack(id) {
@@ -235,10 +248,13 @@
   }
 
   $: selected = costumes.find((item) => item.id === selectedId);
+  $: lendingCostume = costumes.find((item) => item.id === lendingId);
 
   function handleModalKeydown(e) {
     if (e.key === 'Escape') {
-      if (showImportModal) {
+      if (lendingId) {
+        closeLend();
+      } else if (showImportModal) {
         closeImportModal();
       } else if (showDeleteConfirm) {
         cancelDelete();
@@ -314,7 +330,7 @@
               {#if item.status === '借出'}
                 <button type="button" on:click={() => returnBack(item.id)}><Undo2 size={16} />归还</button>
               {:else}
-                <button type="button" on:click={() => lend(item.id)}><Clock size={16} />借出</button>
+                <button type="button" on:click={() => openLend(item.id)}><Clock size={16} />借出</button>
               {/if}
               <button type="button" class="secondary" on:click={() => updateClean(item.id, item.clean === '已清洗' ? '待清洗' : '已清洗')}><CheckCircle2 size={16} />{item.clean === '已清洗' ? '标待洗' : '标已洗'}</button>
             </div>
@@ -477,6 +493,42 @@
     </div>
   {/if}
 
+  {#if lendingCostume}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay" role="presentation" on:click={closeLend}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="lend-title"
+        on:click|stopPropagation
+        on:keydown={handleModalKeydown}
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h2 id="lend-title">借出服装</h2>
+          <button type="button" class="icon-btn" on:click={closeLend} aria-label="关闭"><X size={20} /></button>
+        </div>
+        <form class="lend-form" on:submit|preventDefault={confirmLend}>
+          <div class="status-info">
+            <p><strong>服装：</strong>{lendingCostume.name}</p>
+            <p><strong>剧目：</strong>{lendingCostume.play}</p>
+            <p><strong>应还日期：</strong>{iso(7)}</p>
+          </div>
+          <label>
+            <span>借用人</span>
+            <input bind:value={lendingBorrower} placeholder="请输入借用人" required />
+          </label>
+          <div class="modal-actions">
+            <button type="button" class="secondary" on:click={closeLend}>取消</button>
+            <button type="submit" disabled={!lendingBorrower.trim()}><Clock size={16} />确认借出</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  {/if}
+
   {#if showImportModal}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="modal-overlay" role="presentation" on:click={closeImportModal}>
@@ -595,9 +647,9 @@
   .modal-header h2 { margin: 0; }
   .icon-btn { background: transparent; color: #6b5a4d; padding: 6px; border-radius: 6px; }
   .icon-btn:hover { background: #f6efe7; }
-  .detail-form { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 12px; }
-  .detail-form label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #6b5a4d; }
-  .detail-form label span { font-weight: 500; }
+  .detail-form, .lend-form { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .detail-form label, .lend-form label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #6b5a4d; }
+  .detail-form label span, .lend-form label span { font-weight: 500; }
   .status-info { background: #f6efe7; border-radius: 8px; padding: 12px 14px; margin: 4px 0; }
   .status-info p { margin: 4px 0; font-size: 14px; color: #4a3b30; }
   .modal-actions { display: flex; justify-content: space-between; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
