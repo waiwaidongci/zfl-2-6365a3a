@@ -182,6 +182,10 @@
     const activeWO = getActiveWorkOrder(costumeId);
     if (activeWO) {
       alerts.push({ type: 'workorder', label: `${activeWO.type}中：${activeWO.status}，负责人${activeWO.assignee}` });
+    } else if (costume.clean === '维修中') {
+      alerts.push({ type: 'workorder', label: '档案状态：维修中' });
+    } else if (costume.clean === '待清洗') {
+      alerts.push({ type: 'workorder', label: '档案状态：待清洗' });
     }
     return alerts.length > 0 ? alerts : null;
   }
