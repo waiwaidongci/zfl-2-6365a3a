@@ -36,6 +36,10 @@ const LEGACY_KEYS = {
   [TABLES.packingLists]: 'zfl-2-packing-lists'
 };
 
+function canUseLocalStorage() {
+  return typeof localStorage !== 'undefined';
+}
+
 function generateDeviceId() {
   return 'dev-' + crypto.randomUUID().slice(0, 8);
 }
@@ -70,6 +74,7 @@ function deepClone(obj) {
 }
 
 function safeReadJSON(key) {
+  if (!canUseLocalStorage()) return null;
   try {
     const raw = localStorage.getItem(key);
     if (raw === null || raw === undefined) return null;
@@ -81,6 +86,7 @@ function safeReadJSON(key) {
 }
 
 function safeWriteJSON(key, value) {
+  if (!canUseLocalStorage()) return false;
   try {
     localStorage.setItem(key, JSON.stringify(value));
     return true;
@@ -99,6 +105,7 @@ function writeRawDB(db) {
 }
 
 function hasLegacyData() {
+  if (!canUseLocalStorage()) return false;
   for (const key of Object.values(LEGACY_KEYS)) {
     if (localStorage.getItem(key) !== null) return true;
   }
