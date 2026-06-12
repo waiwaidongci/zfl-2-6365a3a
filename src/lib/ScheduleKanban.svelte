@@ -3,7 +3,7 @@
   import {
     CalendarDays, Plus, Search, X, Save, Trash2, Eye,
     AlertTriangle, AlertOctagon, Clock, Shirt, CheckCircle,
-    Link2, ChevronDown, ChevronUp, Wrench, Droplets, Package
+    Link2, ChevronDown, ChevronUp, Wrench, Droplets, Package, User
   } from 'lucide-svelte';
   import {
     addSchedule,
@@ -282,6 +282,65 @@
     if (level === 'loose' || level === 'tight') return 'match-close';
     if (level === 'mismatch') return 'match-mismatch';
     return 'match-unknown';
+  }
+
+  function getActorBorrowHistory(actorName) {
+    if (!actorName) return [];
+    return costumes
+      .filter((c) => c.borrower === actorName)
+      .map((c) => ({
+        costumeName: c.name,
+        play: c.play,
+        timestamp: c.borrowedAt || new Date().toISOString(),
+        type: '借出'
+      }));
+  }
+
+  function getActorReservationHistory(actorName) {
+    if (!actorName) return [];
+    return reservations
+      .filter((r) => r.reservedFor === actorName && r.type === '演员' && r.status === 'active')
+      .map((r) => ({
+        costumeName: r.costumeName,
+        play: r.play,
+        date: r.date,
+        type: '预约'
+      }));
+  }
+
+  function getActorCostumeHistory(actorName) {
+    const borrowed = getActorBorrowHistory(actorName);
+    const reserved = getActorReservationHistory(actorName);
+    const costumeMap = new Map();
+    for (const r of borrowed) {
+      if (!costumeMap.has(r.costumeName)) {
+        costumeMap.set(r.costumeName, { name: r.costumeName, play: r.play, lastUsed: r.timestamp, type: '借出' });
+      }
+    }
+    for (const r of reserved) {
+      if (!costumeMap.has(r.costumeName)) {
+        costumeMap.set(r.costumeName, { name: r.costumeName, play: r.play, lastUsed: r.date, type: '预约' });
+      }
+    }
+    return [...costumeMap.values()].sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed));
+  }
+
+  function checkPlayMatch(costumePlay, actorPlays) {
+    if (!costumePlay || !actorPlays || actorPlays.length === 0) {
+      return { match: false, label: '无剧目信息', level: 'unknown' };
+    }
+    const match = actorPlays.includes(costumePlay);
+    return {
+      match,
+      label: match ? `演员参演过「${costumePlay}」` : `演员未参演过「${costumePlay}」`,
+      level: match ? 'match' : 'mismatch'
+    };
+  }
+
+  let expandedActorId = null;
+
+  function toggleActorDetail(actorId) {
+    expandedActorId = expandedActorId === actorId ? null : actorId;
   }
 
   function addCostumeLink(costumeId) {
@@ -592,24 +651,88 @@
                 <div class="sk-linked-costume-item">
                   <div class="sk-linked-costume-main">
                     <span class="sk-linked-costume-name"><Shirt size={10} />{costume.name}</span>
-                    <span class="sk-linked-costume-size">{costume.size || '未填尺码'}</span>
+                    <span class="sk-linked-costume-size">{costume.size || '未填尺码'} · {costume.play}</span>
                   </div>
-                  {#if costumeActors.length > 0}
-                    <div class="sk-linked-costume-actors">
-                      {#each costumeActors as ca}
-                        <span class="sk-mini-actor">
-                          {ca.actor?.name || ca.reservation.reservedFor}
-                          {#if ca.sizeMatch}
-                            <span class="sk-mini-size-badge {getMatchBadgeClass(ca.sizeMatch.level)}">{ca.sizeMatch.label}</span>
-                          {/if}
-                        </span>
-                      {/each}
-                    </div>
-                  {/if}
                   <button type="button" class="sk-remove-costume-btn" on:click={() => removeCostumeLink(costume.id)} aria-label="移除">
                     <X size={12} />
                   </button>
                 </div>
+                {#if costumeActors.length > 0}
+                  <div class="sk-costume-actors-section">
+                    <div class="sk-costume-actors-label">
+                      <User size={10} />
+                      <span>预约演员 ({costumeActors.length}位)</span>
+                    </div>
+                    <div class="sk-actor-detail-list">
+                      {#each costumeActors as ca}
+                        {@const actorDetailId = `linked-${costume.id}-${ca.reservation.id}`}
+                        {@const isExpanded = expandedActorId === actorDetailId}
+                        {@const playMatch = ca.actor ? checkPlayMatch(costume.play, ca.actor.plays) : null}
+                        {@const actorHistory = ca.actor ? getActorCostumeHistory(ca.actor.name) : []}
+                        <div class="sk-actor-detail-item">
+                          <button type="button" class="sk-actor-detail-header" on:click={() => toggleActorDetail(actorDetailId)}>
+                            <div class="sk-actor-detail-title">
+                              <span class="sk-actor-detail-name">{ca.actor?.name || ca.reservation.reservedFor}</span>
+                              {#if ca.sizeMatch}
+                                <span class="sk-mini-size-badge {getMatchBadgeClass(ca.sizeMatch.level)}">{ca.sizeMatch.label}</span>
+                              {/if}
+                              {#if !ca.actor}
+                                <span class="sk-actor-no-profile">无档案</span>
+                              {/if}
+                            </div>
+                            <ChevronDown size={14} class={`sk-expand-icon ${isExpanded ? 'sk-expanded' : ''}`} />
+                          </button>
+                          {#if isExpanded && ca.actor}
+                            <div class="sk-actor-detail-body">
+                              {#if ca.sizeMatch}
+                                <div class="sk-detail-row" class:sk-match-perfect={ca.sizeMatch.level === 'perfect'} class:sk-match-close={ca.sizeMatch.level === 'loose' || ca.sizeMatch.level === 'tight'} class:sk-match-mismatch={ca.sizeMatch.level === 'mismatch'} class:sk-match-unknown={ca.sizeMatch.level === 'unknown'}>
+                                  <span class="sk-detail-label">尺码匹配</span>
+                                  <span class="sk-detail-value">服装 {costume.size || '未填'} / 演员 {ca.actor.size || '未填'} — {ca.sizeMatch.label}</span>
+                                </div>
+                              {/if}
+                              {#if playMatch}
+                                <div class="sk-detail-row" class:sk-play-match={playMatch.match} class:sk-play-mismatch={!playMatch.match}>
+                                  <span class="sk-detail-label">剧目匹配</span>
+                                  <span class="sk-detail-value">{playMatch.label}</span>
+                                </div>
+                              {/if}
+                              {#if ca.actor.plays && ca.actor.plays.length > 0}
+                                <div class="sk-detail-row">
+                                  <span class="sk-detail-label">参演剧目</span>
+                                  <div class="sk-play-tags">
+                                    {#each ca.actor.plays as play}
+                                      <span class="sk-play-tag">{play}</span>
+                                    {/each}
+                                  </div>
+                                </div>
+                              {/if}
+                              {#if ca.actor.note}
+                                <div class="sk-detail-row">
+                                  <span class="sk-detail-label">备注</span>
+                                  <span class="sk-detail-value">{ca.actor.note}</span>
+                                </div>
+                              {/if}
+                              {#if actorHistory.length > 0}
+                                <div class="sk-detail-row">
+                                  <span class="sk-detail-label">历史使用</span>
+                                  <div class="sk-history-list">
+                                    {#each actorHistory.slice(0, 5) as hist}
+                                      <div class="sk-history-item">
+                                        <span class="sk-history-costume">{hist.name}</span>
+                                        <span class="sk-history-play">{hist.play}</span>
+                                        <span class="sk-history-type">{hist.type}</span>
+                                      </div>
+                                    {/each}
+                                  </div>
+                                </div>
+                              {/if}
+                            </div>
+                          {/if}
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
               {/each}
             </div>
           {:else}
@@ -624,25 +747,59 @@
           <div class="sk-pick-list">
             {#each availableCostumesToLink.slice(0, 20) as costume}
               {@const costumeActors = getActorsForCostumeAndDate(costume.id, scheduleForm.date)}
-              <button type="button" class="sk-pick-card" on:click={() => addCostumeLink(costume.id)}>
-                <div class="sk-pick-card-main">
-                  <strong>{costume.name}</strong>
-                  <span>{costume.play} · {costume.size || '未填'}</span>
-                </div>
-                {#if costumeActors.length > 0}
-                  <div class="sk-pick-card-actors">
-                    {#each costumeActors.slice(0, 2) as ca}
-                      <span class="sk-mini-actor">
-                        {ca.actor?.name || ca.reservation.reservedFor}
-                        {#if ca.sizeMatch}
-                          <span class="sk-mini-size-badge {getMatchBadgeClass(ca.sizeMatch.level)}">{ca.sizeMatch.label}</span>
+              {@const pickCardId = `pick-${costume.id}`}
+              {@const isPickExpanded = expandedActorId === pickCardId}
+              <div class="sk-pick-card-wrapper">
+                <button type="button" class="sk-pick-card" on:click={() => addCostumeLink(costume.id)}>
+                  <div class="sk-pick-card-main">
+                    <strong>{costume.name}</strong>
+                    <span>{costume.play} · {costume.size || '未填'}</span>
+                  </div>
+                  {#if costumeActors.length > 0}
+                    <button type="button" class="sk-pick-actors-toggle" on:click|stopPropagation={() => toggleActorDetail(pickCardId)} aria-label="查看演员详情">
+                      <User size={12} />
+                      <span>{costumeActors.length}</span>
+                      <ChevronDown size={12} class={`sk-expand-icon ${isPickExpanded ? 'sk-expanded' : ''}`} />
+                    </button>
+                  {/if}
+                  <Plus size={14} class="sk-pick-add" />
+                </button>
+                {#if isPickExpanded && costumeActors.length > 0}
+                  <div class="sk-pick-actors-detail">
+                    {#each costumeActors.slice(0, 3) as ca}
+                      {@const playMatch = ca.actor ? checkPlayMatch(costume.play, ca.actor.plays) : null}
+                      <div class="sk-pick-actor-row">
+                        <div class="sk-pick-actor-head">
+                          <span class="sk-pick-actor-name">{ca.actor?.name || ca.reservation.reservedFor}</span>
+                          {#if ca.sizeMatch}
+                            <span class="sk-mini-size-badge {getMatchBadgeClass(ca.sizeMatch.level)}">{ca.sizeMatch.label}</span>
+                          {/if}
+                          {#if !ca.actor}
+                            <span class="sk-actor-no-profile">无档案</span>
+                          {/if}
+                        </div>
+                        {#if ca.actor}
+                          <div class="sk-pick-actor-info">
+                            {#if ca.actor.plays && ca.actor.plays.length > 0}
+                              <div class="sk-pick-actor-plays">
+                                {#each ca.actor.plays.slice(0, 3) as play}
+                                  <span class="sk-mini-play-tag">{play}</span>
+                                {/each}
+                              </div>
+                            {/if}
+                            {#if ca.actor.note}
+                              <p class="sk-pick-actor-note">{ca.actor.note}</p>
+                            {/if}
+                          </div>
                         {/if}
-                      </span>
+                      </div>
                     {/each}
+                    {#if costumeActors.length > 3}
+                      <p class="sk-more-actors-text">还有 {costumeActors.length - 3} 位演员...</p>
+                    {/if}
                   </div>
                 {/if}
-                <Plus size={14} class="sk-pick-add" />
-              </button>
+              </div>
             {/each}
             {#if availableCostumesToLink.length === 0}
               <p class="sk-hint">无可添加的服装</p>
@@ -1395,6 +1552,219 @@
   .sk-remove-costume-btn:hover { background: #f0e6dc; color: #6b5a4d; }
   .sk-pick-card-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
   .sk-pick-card-actors { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+
+  .sk-costume-actors-section {
+    margin-top: 4px;
+    padding: 8px 10px;
+    background: #faf6f2;
+    border-radius: 6px;
+    border: 1px solid #e8dccd;
+    border-top: none;
+    border-top-left-radius: 0;
+    border-top-right-radius: 0;
+  }
+  .sk-costume-actors-label {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    color: #8a7665;
+    font-weight: 500;
+    margin-bottom: 6px;
+  }
+  .sk-actor-detail-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .sk-actor-detail-item {
+    border-radius: 6px;
+    overflow: hidden;
+    background: #fff;
+    border: 1px solid #e4d8cc;
+  }
+  .sk-actor-detail-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    width: 100%;
+    padding: 6px 8px;
+    background: none;
+    border: none;
+    cursor: pointer;
+    font: inherit;
+  }
+  .sk-actor-detail-header:hover { background: #f6efe7; }
+  .sk-actor-detail-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .sk-actor-detail-name {
+    font-size: 12px;
+    color: #26211c;
+    font-weight: 500;
+  }
+  .sk-actor-no-profile {
+    font-size: 10px;
+    color: #8a7665;
+    background: #f0e6dc;
+    padding: 1px 6px;
+    border-radius: 3px;
+  }
+  .sk-expand-icon {
+    color: #8a7665;
+    transition: transform .2s ease;
+  }
+  .sk-expand-icon.sk-expanded { transform: rotate(180deg); }
+
+  .sk-actor-detail-body {
+    padding: 8px 10px;
+    border-top: 1px solid #e4d8cc;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .sk-detail-row {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 6px 8px;
+    border-radius: 4px;
+    background: #faf6f2;
+  }
+  .sk-detail-row.sk-match-perfect { background: #eef6ee; }
+  .sk-detail-row.sk-match-close { background: #fff4e6; }
+  .sk-detail-row.sk-match-mismatch { background: #fdecea; }
+  .sk-detail-row.sk-match-unknown { background: #f6efe7; }
+  .sk-detail-row.sk-play-match { background: #eef6ee; }
+  .sk-detail-row.sk-play-mismatch { background: #f6efe7; }
+  .sk-detail-label {
+    font-size: 11px;
+    color: #8a7665;
+    font-weight: 500;
+  }
+  .sk-detail-value {
+    font-size: 12px;
+    color: #3b2f26;
+  }
+  .sk-play-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+  }
+  .sk-play-tag {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: #e6eef6;
+    color: #1a4a8a;
+    font-weight: 500;
+  }
+  .sk-history-list {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .sk-history-item {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 11px;
+  }
+  .sk-history-costume {
+    color: #26211c;
+    font-weight: 500;
+  }
+  .sk-history-play {
+    color: #6b5a4d;
+    background: #f0e6dc;
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  .sk-history-type {
+    margin-left: auto;
+    color: #8a7665;
+    font-size: 10px;
+  }
+
+  .sk-pick-card-wrapper {
+    display: flex;
+    flex-direction: column;
+  }
+  .sk-pick-actors-toggle {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+    padding: 3px 6px;
+    background: #f6efe7;
+    border: 1px solid #e4d8cc;
+    border-radius: 4px;
+    font-size: 11px;
+    color: #6b5a4d;
+    cursor: pointer;
+    font: inherit;
+  }
+  .sk-pick-actors-toggle:hover { background: #f0e6dc; }
+  .sk-pick-actors-detail {
+    margin-top: 2px;
+    padding: 8px;
+    background: #faf6f2;
+    border: 1px solid #e4d8cc;
+    border-radius: 0 0 6px 6px;
+    border-top: none;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .sk-pick-actor-row {
+    background: #fff;
+    border-radius: 4px;
+    padding: 6px 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .sk-pick-actor-head {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .sk-pick-actor-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: #26211c;
+  }
+  .sk-pick-actor-info {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+  .sk-pick-actor-plays {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+  }
+  .sk-mini-play-tag {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #e6eef6;
+    color: #1a4a8a;
+  }
+  .sk-pick-actor-note {
+    margin: 0;
+    font-size: 11px;
+    color: #6b5a4d;
+    line-height: 1.4;
+  }
+  .sk-more-actors-text {
+    margin: 0;
+    font-size: 11px;
+    color: #8a7665;
+    text-align: center;
+  }
 
   .sk-risk-list {
     margin-top: 10px;
