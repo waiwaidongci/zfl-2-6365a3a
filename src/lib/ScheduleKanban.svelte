@@ -750,11 +750,14 @@
               {@const pickCardId = `pick-${costume.id}`}
               {@const isPickExpanded = expandedActorId === pickCardId}
               <div class="sk-pick-card-wrapper">
-                <button type="button" class="sk-pick-card" on:click={() => addCostumeLink(costume.id)}>
-                  <div class="sk-pick-card-main">
-                    <strong>{costume.name}</strong>
-                    <span>{costume.play} · {costume.size || '未填'}</span>
-                  </div>
+                <div class="sk-pick-card-row">
+                  <button type="button" class="sk-pick-card" on:click={() => addCostumeLink(costume.id)}>
+                    <div class="sk-pick-card-main">
+                      <strong>{costume.name}</strong>
+                      <span>{costume.play} · {costume.size || '未填'}</span>
+                    </div>
+                    <Plus size={14} class="sk-pick-add" />
+                  </button>
                   {#if costumeActors.length > 0}
                     <button type="button" class="sk-pick-actors-toggle" on:click|stopPropagation={() => toggleActorDetail(pickCardId)} aria-label="查看演员详情">
                       <User size={12} />
@@ -762,12 +765,12 @@
                       <ChevronDown size={12} class={`sk-expand-icon ${isPickExpanded ? 'sk-expanded' : ''}`} />
                     </button>
                   {/if}
-                  <Plus size={14} class="sk-pick-add" />
-                </button>
+                </div>
                 {#if isPickExpanded && costumeActors.length > 0}
                   <div class="sk-pick-actors-detail">
                     {#each costumeActors.slice(0, 3) as ca}
                       {@const playMatch = ca.actor ? checkPlayMatch(costume.play, ca.actor.plays) : null}
+                      {@const actorHistory = ca.actor ? getActorCostumeHistory(ca.actor.name) : []}
                       <div class="sk-pick-actor-row">
                         <div class="sk-pick-actor-head">
                           <span class="sk-pick-actor-name">{ca.actor?.name || ca.reservation.reservedFor}</span>
@@ -789,6 +792,20 @@
                             {/if}
                             {#if ca.actor.note}
                               <p class="sk-pick-actor-note">{ca.actor.note}</p>
+                            {/if}
+                            {#if actorHistory.length > 0}
+                              <div class="sk-pick-actor-history">
+                                <span class="sk-pick-history-label">历史使用</span>
+                                <div class="sk-history-list">
+                                  {#each actorHistory.slice(0, 3) as hist}
+                                    <div class="sk-history-item">
+                                      <span class="sk-history-costume">{hist.name}</span>
+                                      <span class="sk-history-play">{hist.play}</span>
+                                      <span class="sk-history-type">{hist.type}</span>
+                                    </div>
+                                  {/each}
+                                </div>
+                              </div>
                             {/if}
                           </div>
                         {/if}
@@ -1692,9 +1709,15 @@
     display: flex;
     flex-direction: column;
   }
+  .sk-pick-card-row {
+    display: flex;
+    align-items: stretch;
+    gap: 6px;
+  }
   .sk-pick-actors-toggle {
     display: flex;
     align-items: center;
+    align-self: stretch;
     gap: 2px;
     padding: 3px 6px;
     background: #f6efe7;
@@ -1758,6 +1781,17 @@
     font-size: 11px;
     color: #6b5a4d;
     line-height: 1.4;
+  }
+  .sk-pick-actor-history {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding-top: 2px;
+  }
+  .sk-pick-history-label {
+    font-size: 10px;
+    color: #8a7665;
+    font-weight: 600;
   }
   .sk-more-actors-text {
     margin: 0;
@@ -1957,6 +1991,8 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+    flex: 1;
+    min-width: 0;
     padding: 8px 10px;
     background: #fff;
     border: 1px solid #e4d8cc;
