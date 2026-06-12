@@ -1287,13 +1287,12 @@
   });
   $: selectedActor = actors.find((a) => a.id === selectedActorId);
   $: lendingActor = actors.find((a) => a.id === lendingActorId);
-  $: lendingSizeMatch = lendingCostume && lendingActor ? matchSize(lendingCostume.size, lendingActor.size) : null;
-  $: lendingPlayMatch = lendingCostume && lendingActor ? checkPlayMatch(lendingCostume.play, lendingActor.plays) : null;
   $: lendingActorByBorrower = findActorByName(lendingBorrower);
+  $: lendingActiveActor = lendingActor || lendingActorByBorrower;
+  $: lendingSizeMatch = lendingCostume && lendingActiveActor ? matchSize(lendingCostume.size, lendingActiveActor.size) : null;
+  $: lendingPlayMatch = lendingCostume && lendingActiveActor ? checkPlayMatch(lendingCostume.play, lendingActiveActor.plays) : null;
   $: lendingBorrowerSuggestions = searchActorsByName(lendingBorrower);
-  $: lendingActorHistory = lendingActor || lendingActorByBorrower
-    ? getActorCostumeHistory((lendingActor || lendingActorByBorrower).name)
-    : [];
+  $: lendingActorHistory = lendingActiveActor ? getActorCostumeHistory(lendingActiveActor.name) : [];
   $: filteredPackingLists = packingLists.filter((pl) => {
     const text = `${pl.name}${pl.play}${pl.performanceDate}`;
     const matchesQuery = text.includes(packingListQuery.trim());
@@ -1364,7 +1363,7 @@
     costumes = costumes.map((c) => c.id === lendingId ? { ...c, borrower, due: dueDate, status: '借出' } : c);
     persist();
     let summary = `借出「${costume.name}」给${borrower}，应还日期：${dueDate}`;
-    if (lendingActor && lendingSizeMatch) {
+    if (lendingActiveActor && lendingSizeMatch) {
       summary += `，尺码匹配：${lendingSizeMatch.label}`;
     }
     addRecord('借出', costume, borrower, summary);
@@ -2381,60 +2380,57 @@
             {/if}
           </label>
 
-          {#if lendingActor || lendingActorByBorrower}
-            {@const activeActor = lendingActor || lendingActorByBorrower}
-            {@const sizeMatch = lendingCostume && activeActor ? matchSize(lendingCostume.size, activeActor.size) : null}
-            {@const playMatch = lendingCostume && activeActor ? checkPlayMatch(lendingCostume.play, activeActor.plays) : null}
+          {#if lendingActiveActor}
             <div class="actor-match-panel">
               <div class="actor-match-header">
                 <User size={16} />
-                <strong>演员档案：{activeActor.name}</strong>
-                {#if activeActor.size}
-                  <span class="match-badge {getMatchBadgeClass(sizeMatch?.level)}">{sizeMatch?.label || activeActor.size}</span>
+                <strong>演员档案：{lendingActiveActor.name}</strong>
+                {#if lendingActiveActor.size}
+                  <span class="match-badge {getMatchBadgeClass(lendingSizeMatch?.level)}">{lendingSizeMatch?.label || lendingActiveActor.size}</span>
                 {/if}
               </div>
 
-              {#if sizeMatch}
-                <div class="size-match-row" class:match-perfect={sizeMatch.level === 'perfect'} class:match-close={sizeMatch.level === 'loose' || sizeMatch.level === 'tight'} class:match-mismatch={sizeMatch.level === 'mismatch'} class:match-unknown={sizeMatch.level === 'unknown'}>
-                  {#if sizeMatch.level === 'perfect'}
+              {#if lendingSizeMatch}
+                <div class="size-match-row" class:match-perfect={lendingSizeMatch.level === 'perfect'} class:match-close={lendingSizeMatch.level === 'loose' || lendingSizeMatch.level === 'tight'} class:match-mismatch={lendingSizeMatch.level === 'mismatch'} class:match-unknown={lendingSizeMatch.level === 'unknown'}>
+                  {#if lendingSizeMatch.level === 'perfect'}
                     <CheckCircle size={14} />
-                  {:else if sizeMatch.level === 'loose' || sizeMatch.level === 'tight'}
+                  {:else if lendingSizeMatch.level === 'loose' || lendingSizeMatch.level === 'tight'}
                     <AlertTriangle size={14} />
-                  {:else if sizeMatch.level === 'mismatch'}
+                  {:else if lendingSizeMatch.level === 'mismatch'}
                     <XCircle size={14} />
                   {:else}
                     <AlertTriangle size={14} />
                   {/if}
-                  <span>尺码：服装 {lendingCostume.size || '未填'} / 演员 {activeActor.size || '未填'} — {sizeMatch.label}</span>
+                  <span>尺码：服装 {lendingCostume.size || '未填'} / 演员 {lendingActiveActor.size || '未填'} — {lendingSizeMatch.label}</span>
                 </div>
               {/if}
 
-              {#if playMatch}
-                <div class="size-match-row" class:play-match={playMatch.match} class:play-mismatch={!playMatch.match}>
-                  {#if playMatch.match}
+              {#if lendingPlayMatch}
+                <div class="size-match-row" class:play-match={lendingPlayMatch.match} class:play-mismatch={!lendingPlayMatch.match}>
+                  {#if lendingPlayMatch.match}
                     <CheckCircle size={14} />
                   {:else}
                     <AlertTriangle size={14} />
                   {/if}
-                  <span>剧目：{playMatch.label}</span>
+                  <span>剧目：{lendingPlayMatch.label}</span>
                 </div>
               {/if}
 
-              {#if activeActor.plays && activeActor.plays.length > 0}
+              {#if lendingActiveActor.plays && lendingActiveActor.plays.length > 0}
                 <div class="actor-plays-row">
                   <span class="label">参演剧目：</span>
                   <div class="actor-plays-tags">
-                    {#each activeActor.plays as play}
+                    {#each lendingActiveActor.plays as play}
                       <span class="record-play-tag">{play}</span>
                     {/each}
                   </div>
                 </div>
               {/if}
 
-              {#if activeActor.note}
+              {#if lendingActiveActor.note}
                 <div class="actor-note-row">
                   <span class="label">备注：</span>
-                  <span>{activeActor.note}</span>
+                  <span>{lendingActiveActor.note}</span>
                 </div>
               {/if}
 

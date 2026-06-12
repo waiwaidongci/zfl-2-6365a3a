@@ -373,7 +373,7 @@
         </div>
       </div>
       <div class="sk-risk-stat sk-risk-stat-resolved">
-        <CheckCircle2 size={18} />
+        <CheckCircle size={18} />
         <div>
           <div class="sk-risk-stat-num">{riskStats.resolved}</div>
           <div class="sk-risk-stat-label">已解决</div>
@@ -457,15 +457,30 @@
                   {#if linkedDetails.length > 0}
                     <div class="sk-linked">
                       <div class="sk-linked-title"><Link2 size={12} />关联服装 ({linkedDetails.length})</div>
-                      <div class="sk-linked-list">
+                      <div class="sk-linked-costume-cards">
                         {#each linkedDetails as costume}
-                          <span class="sk-costume-tag" class:sk-costume-borrowed={costume.status === '借出'} class:sk-costume-overdue={costume.status === '借出' && costume.due && costume.due < iso(0)} class:sk-costume-cleaning={costume.clean === '待清洗'} class:sk-costume-repair={costume.clean === '维修中'}>
-                            <Shirt size={10} />{costume.name}
-                            {#if costume.status === '借出'}<Clock size={10} />
-                            {:else if costume.clean === '待清洗'}<Droplets size={10} />
-                            {:else if costume.clean === '维修中'}<Wrench size={10} />
+                          {@const costumeActors = getActorsForCostumeAndDate(costume.id, date)}
+                          <div class="sk-mini-costume-card" class:sk-mini-costume-borrowed={costume.status === '借出'}>
+                            <div class="sk-mini-costume-head">
+                              <span class="sk-mini-costume-name"><Shirt size={10} />{costume.name}</span>
+                              <span class="sk-mini-costume-size">{costume.size || '未填'}</span>
+                            </div>
+                            {#if costumeActors.length > 0}
+                              <div class="sk-mini-costume-actors">
+                                {#each costumeActors.slice(0, 2) as ca}
+                                  <span class="sk-mini-costume-actor">
+                                    {ca.actor?.name || ca.reservation.reservedFor}
+                                    {#if ca.sizeMatch}
+                                      <span class="sk-mini-size-badge {getMatchBadgeClass(ca.sizeMatch.level)}">{ca.sizeMatch.label}</span>
+                                    {/if}
+                                  </span>
+                                {/each}
+                                {#if costumeActors.length > 2}
+                                  <span class="sk-more-actors">+{costumeActors.length - 2}</span>
+                                {/if}
+                              </div>
                             {/if}
-                          </span>
+                          </div>
                         {/each}
                       </div>
                     </div>
@@ -1245,6 +1260,69 @@
     display: flex;
     flex-wrap: wrap;
     gap: 4px;
+  }
+  .sk-linked-costume-cards {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .sk-mini-costume-card {
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+    padding: 6px 8px;
+    background: #fff;
+    border: 1px solid #e4d8cc;
+    border-radius: 6px;
+  }
+  .sk-mini-costume-card.sk-mini-costume-borrowed {
+    background: #fff8f0;
+    border-color: #e8d0b8;
+  }
+  .sk-mini-costume-head {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 6px;
+  }
+  .sk-mini-costume-name {
+    font-size: 12px;
+    color: #26211c;
+    font-weight: 500;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .sk-mini-costume-size {
+    font-size: 10px;
+    color: #6b5a4d;
+    background: #f6efe7;
+    padding: 1px 6px;
+    border-radius: 3px;
+    flex-shrink: 0;
+  }
+  .sk-mini-costume-actors {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 3px;
+    align-items: center;
+  }
+  .sk-mini-costume-actor {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 10px;
+    color: #6b5a4d;
+    background: #faf6f2;
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  .sk-more-actors {
+    font-size: 10px;
+    color: #8a7665;
   }
   .sk-costume-tag {
     display: inline-flex;
