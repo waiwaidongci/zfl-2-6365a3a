@@ -66,6 +66,7 @@
   let batchActionType = null;
   let batchActionNote = '';
   let batchTargetLocation = '';
+  let batchUseActualLocation = true;
   let isBatchProcessing = false;
   let batchResult = null;
   let discrepancyTypeFilter = '全部差异';
@@ -362,20 +363,26 @@
     selectedItemIds = new Set();
   }
 
-  function hasActiveWorkOrder(costumeId) {
+  function hasActiveWorkOrder(costumeId, type = null) {
     const workOrders = getAll(TABLES.workOrders);
-    return workOrders.some((wo) =>
-      wo.costumeId === costumeId &&
-      (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中')
-    );
+    return workOrders.some((wo) => {
+      if (wo.costumeId !== costumeId) return false;
+      const isActive = wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中';
+      if (!isActive) return false;
+      if (type === null) return true;
+      return wo.type === type;
+    });
   }
 
-  function getActiveWorkOrder(costumeId) {
+  function getActiveWorkOrder(costumeId, type = null) {
     const workOrders = getAll(TABLES.workOrders);
-    return workOrders.find((wo) =>
-      wo.costumeId === costumeId &&
-      (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中')
-    );
+    return workOrders.find((wo) => {
+      if (wo.costumeId !== costumeId) return false;
+      const isActive = wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中';
+      if (!isActive) return false;
+      if (type === null) return true;
+      return wo.type === type;
+    });
   }
 
   function openBatchAction(actionType) {
@@ -387,6 +394,8 @@
     batchActionType = actionType;
     batchActionNote = '';
     batchTargetLocation = '';
+    const locationMismatchItems = selected.filter((i) => i.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH && i.actualLocation && i.actualLocation.trim());
+    batchUseActualLocation = locationMismatchItems.length > 0;
     batchResult = null;
     showBatchConfirmModal = true;
   }
@@ -396,6 +405,7 @@
     batchActionType = null;
     batchActionNote = '';
     batchTargetLocation = '';
+    batchUseActualLocation = true;
     isBatchProcessing = false;
     batchResult = null;
   }
@@ -453,10 +463,10 @@
         return;
       }
 
-      if (hasActiveWorkOrder(costume.id)) {
+      if (hasActiveWorkOrder(costume.id, type)) {
         skippedCount++;
-        const activeWO = getActiveWorkOrder(costume.id);
-        skippedItems.push({ name: item.costumeName, reason: `已有未完成${activeWO.type}工单` });
+        const activeWO = getActiveWorkOrder(costume.id, type);
+        skippedItems.push({ name: item.costumeName, reason: `已有未完成${activeWO?.type || type}工单` });
         return;
       }
 
@@ -529,10 +539,6 @@
   }
 
   function batchUpdateLocations(items) {
-    if (!batchTargetLocation.trim()) {
-      return { successCount: 0, skippedCount: items.length, skippedItems: items.map((i) => ({ name: i.costumeName, reason: '未指定目标位置' })), total: items.length, action: '批量更新位置' };
-    }
-
     const costumes = getAll(TABLES.costumes);
     const records = getAll(TABLES.records);
 
@@ -541,7 +547,18 @@
     let successCount = 0;
     let skippedCount = 0;
     const skippedItems = [];
-    const targetLocation = batchTargetLocation.trim();
+    const fallbackLocation = batchTargetLocation.trim();
+    const useActual = batchUseActualLocation;
+
+    let locationUsedMode = '';
+    if (useActual) {
+      locationUsedMode = fallbackLocation ? '优先实际位置+补充目标位置' : '仅使用实际位置';
+    } else {
+      locationUsedMode = '统一目标位置';
+      if (!fallbackLocation) {
+        return { successCount: 0, skippedCount: items.length, skippedItems: items.map((i) => ({ name: i.costumeName, reason: '未指定统一目标位置' })), total: items.length, action: '批量更新位置' };
+      }
+    }
 
     items.forEach((item) => {
       const costume = costumes.find((c) => c.id === item.costumeId);
@@ -551,11 +568,33 @@
         return;
       }
 
+      let targetLoc = '';
+      if (useActual) {
+        if (item.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH && item.actualLocation && item.actualLocation.trim()) {
+          targetLoc = item.actualLocation.trim();
+        } else if (fallbackLocation) {
+          targetLoc = fallbackLocation;
+        }
+      } else {
+        targetLoc = fallbackLocation;
+      }
+
+      if (!targetLoc) {
+        skippedCount++;
+        const reason = useActual ? '无实际位置记录且未设置补充目标位置' : '未指定目标位置';
+        skippedItems.push({ name: item.costumeName, reason });
+        return;
+      }
+
       const costumeIdx = updatedCostumes.findIndex((c) => c.id === costume.id);
       if (costumeIdx !== -1) {
         const oldLocation = updatedCostumes[costumeIdx].location || '未设置';
-        updatedCostumes[costumeIdx] = { ...updatedCostumes[costumeIdx], location: targetLocation };
+        updatedCostumes[costumeIdx] = { ...updatedCostumes[costumeIdx], location: targetLoc };
         successCount++;
+
+        const sourceLabel = useActual && item.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH && item.actualLocation && item.actualLocation.trim()
+          ? '（盘点实际位置）'
+          : '（补充目标位置）';
 
         const record = {
           id: crypto.randomUUID(),
@@ -564,7 +603,7 @@
           costumeName: costume.name,
           play: costume.play,
           operator: '盘点批量',
-          summary: `「${costume.name}」位置从「${oldLocation}」更新为「${targetLocation}」`
+          summary: `「${costume.name}」位置从「${oldLocation}」更新为「${targetLoc}」${sourceLabel}`
         };
         newRecords.push(record);
       }
@@ -578,8 +617,8 @@
       skippedCount,
       skippedItems,
       total: items.length,
-      action: '批量更新位置',
-      targetLocation
+      action: `批量更新位置 - ${locationUsedMode}`,
+      targetLocation: useActual ? `按明细实际位置${fallbackLocation ? `，补充：${fallbackLocation}` : ''}` : fallbackLocation
     };
   }
 
@@ -695,12 +734,18 @@
   $: selectedMissingCount = selectedItemsForBatch.filter((i) => i.actualStatus === INVENTORY_STATUS.MISSING).length;
   $: selectedLocationCount = selectedItemsForBatch.filter((i) => i.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH).length;
   $: selectedStatusCount = selectedItemsForBatch.filter((i) => i.actualStatus === INVENTORY_STATUS.STATUS_MISMATCH).length;
-  $: selectedItemsWithActiveWO = selectedItemsForBatch.filter((i) => hasActiveWorkOrder(i.costumeId)).length;
+  $: selectedItemsWithActiveCleanWO = selectedItemsForBatch.filter((i) => hasActiveWorkOrder(i.costumeId, '清洗')).length;
+  $: selectedItemsWithActiveRepairWO = selectedItemsForBatch.filter((i) => hasActiveWorkOrder(i.costumeId, '维修')).length;
+  $: selectedItemsWithAnyActiveWO = selectedItemsForBatch.filter((i) => hasActiveWorkOrder(i.costumeId, null)).length;
   $: selectedItemsBorrowed = selectedItemsForBatch.filter((i) => {
     const costumes = getAll(TABLES.costumes);
     const c = costumes.find((cs) => cs.id === i.costumeId);
     return c && c.status === '借出';
   }).length;
+  $: selectedLocationWithActual = selectedItemsForBatch.filter((i) =>
+    i.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH && i.actualLocation && i.actualLocation.trim()
+  ).length;
+  $: selectedLocationWithoutActual = selectedLocationCount - selectedLocationWithActual;
 
   function getStatusClass(status) {
     if (status === INVENTORY_STATUS.NORMAL) return 'status-normal';
@@ -1372,20 +1417,53 @@
                   </div>
                 </div>
 
-                {#if batchActionType === 'clean' || batchActionType === 'repair'}
+                {#if batchActionType === 'clean'}
                   <div class="batch-warn-info">
                     <div class="breakdown-row">
                       <span class="breakdown-label">
-                        <CheckCircle size={12} class="icon-success" />可创建工单
+                        <CheckCircle size={12} class="icon-success" />可创建清洗工单
                       </span>
-                      <span class="breakdown-value success">{selectedItemsForBatch.length - selectedItemsWithActiveWO} 件</span>
+                      <span class="breakdown-value success">{selectedItemsForBatch.length - selectedItemsWithActiveCleanWO} 件</span>
                     </div>
-                    {#if selectedItemsWithActiveWO > 0}
+                    {#if selectedItemsWithActiveCleanWO > 0}
                       <div class="breakdown-row">
                         <span class="breakdown-label">
-                          <AlertTriangle size={12} class="icon-warn" />将跳过（已有未完成工单）
+                          <AlertTriangle size={12} class="icon-warn" />将跳过（已有未完成清洗工单）
                         </span>
-                        <span class="breakdown-value warn">{selectedItemsWithActiveWO} 件</span>
+                        <span class="breakdown-value warn">{selectedItemsWithActiveCleanWO} 件</span>
+                      </div>
+                    {/if}
+                    {#if selectedItemsWithActiveRepairWO > 0}
+                      <div class="breakdown-row">
+                        <span class="breakdown-label">
+                          <Droplets size={12} class="icon-status" />含维修中（仍可创建清洗工单）
+                        </span>
+                        <span class="breakdown-value">{selectedItemsWithActiveRepairWO} 件</span>
+                      </div>
+                    {/if}
+                  </div>
+                {:else if batchActionType === 'repair'}
+                  <div class="batch-warn-info">
+                    <div class="breakdown-row">
+                      <span class="breakdown-label">
+                        <CheckCircle size={12} class="icon-success" />可创建维修工单
+                      </span>
+                      <span class="breakdown-value success">{selectedItemsForBatch.length - selectedItemsWithActiveRepairWO} 件</span>
+                    </div>
+                    {#if selectedItemsWithActiveRepairWO > 0}
+                      <div class="breakdown-row">
+                        <span class="breakdown-label">
+                          <AlertTriangle size={12} class="icon-warn" />将跳过（已有未完成维修工单）
+                        </span>
+                        <span class="breakdown-value warn">{selectedItemsWithActiveRepairWO} 件</span>
+                      </div>
+                    {/if}
+                    {#if selectedItemsWithActiveCleanWO > 0}
+                      <div class="breakdown-row">
+                        <span class="breakdown-label">
+                          <Wrench size={12} class="icon-location" />含清洗中（仍可创建维修工单）
+                        </span>
+                        <span class="breakdown-value">{selectedItemsWithActiveCleanWO} 件</span>
                       </div>
                     {/if}
                   </div>
@@ -1412,10 +1490,54 @@
               </div>
 
               {#if batchActionType === 'updateLocation'}
-                <label class="batch-input">
-                  <span>目标位置</span>
-                  <input bind:value={batchTargetLocation} placeholder="请输入新的存放位置" />
-                </label>
+                <div class="batch-location-options">
+                  <div class="batch-location-mode">
+                    <label class="radio-label">
+                      <input type="radio" bind:group={batchUseActualLocation} value={true} />
+                      <span>使用盘点记录的实际位置（推荐）</span>
+                    </label>
+                    <label class="radio-label">
+                      <input type="radio" bind:group={batchUseActualLocation} value={false} />
+                      <span>统一设置为以下位置</span>
+                    </label>
+                  </div>
+
+                  {#if batchUseActualLocation}
+                    <div class="batch-warn-info">
+                      <div class="breakdown-row">
+                        <span class="breakdown-label">
+                          <CheckCircle size={12} class="icon-success" />有实际位置记录
+                        </span>
+                        <span class="breakdown-value success">{selectedLocationWithActual} 件</span>
+                      </div>
+                      {#if selectedLocationWithoutActual > 0}
+                        <div class="breakdown-row">
+                          <span class="breakdown-label">
+                            <AlertTriangle size={12} class="icon-warn" />无实际位置（需目标位置）
+                          </span>
+                          <span class="breakdown-value warn">{selectedLocationWithoutActual} 件</span>
+                        </div>
+                      {/if}
+                      {#if selectedMissingCount + selectedStatusCount > 0}
+                        <div class="breakdown-row">
+                          <span class="breakdown-label">
+                            <AlertTriangle size={12} class="icon-warn" />非位置不符类型（需目标位置）
+                          </span>
+                          <span class="breakdown-value warn">{selectedMissingCount + selectedStatusCount} 件</span>
+                        </div>
+                      {/if}
+                    </div>
+                    <label class="batch-input">
+                      <span>目标位置（用于无实际位置的项）</span>
+                      <input bind:value={batchTargetLocation} placeholder="选填，用于补充无实际位置的服装" />
+                    </label>
+                  {:else}
+                    <label class="batch-input">
+                      <span>统一目标位置</span>
+                      <input bind:value={batchTargetLocation} placeholder="请输入统一的新存放位置" />
+                    </label>
+                  {/if}
+                </div>
               {/if}
 
               {#if batchActionType === 'clean' || batchActionType === 'repair'}
@@ -1502,7 +1624,13 @@
                   type="button"
                   class={batchActionType === 'return' ? '' : batchActionType === 'updateLocation' ? 'batch-location-btn' : ''}
                   on:click={executeBatchAction}
-                  disabled={isBatchProcessing || (batchActionType === 'updateLocation' && !batchTargetLocation.trim())}
+                  disabled={
+                    isBatchProcessing ||
+                    (batchActionType === 'updateLocation' &&
+                      !batchUseActualLocation && !batchTargetLocation.trim()) ||
+                    (batchActionType === 'updateLocation' &&
+                      batchUseActualLocation && selectedLocationWithActual === 0 && !batchTargetLocation.trim())
+                  }
                 >
                   {#if isBatchProcessing}
                     <Clock size={16} />处理中...
@@ -2686,6 +2814,38 @@
   .icon-status { color: #1a4a8a; }
   .icon-success { color: #2d5a2d; }
   .icon-warn { color: #8a5a1a; }
+
+  .batch-location-options {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    margin-bottom: 4px;
+  }
+
+  .batch-location-mode {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 12px;
+    background: #faf6f2;
+    border-radius: 8px;
+    border: 1px solid #e4d8cc;
+  }
+
+  .radio-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    color: #3b2f26;
+    font-weight: 500;
+    cursor: pointer;
+  }
+
+  .radio-label input[type="radio"] {
+    accent-color: #603d2d;
+    cursor: pointer;
+  }
 
   .batch-input {
     display: flex;
