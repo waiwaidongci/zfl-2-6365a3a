@@ -751,6 +751,57 @@
     return 'match-unknown';
   }
 
+  function findActorByName(name) {
+    if (!name || !name.trim()) return null;
+    const trimmed = name.trim();
+    return actors.find((a) => a.name === trimmed) || null;
+  }
+
+  function searchActorsByName(name) {
+    if (!name || !name.trim()) return [];
+    const trimmed = name.trim().toLowerCase();
+    return actors.filter((a) => a.name.toLowerCase().includes(trimmed));
+  }
+
+  function getActorBorrowHistory(actorName) {
+    if (!actorName) return [];
+    return records
+      .filter((r) => r.type === '借出' && r.operator === actorName)
+      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+  }
+
+  function getActorReservationHistory(actorName) {
+    if (!actorName) return [];
+    return reservations.filter(
+      (r) => r.type === '演员' && r.reservedFor === actorName
+    );
+  }
+
+  function getActorCostumeHistory(actorName) {
+    const borrowed = getActorBorrowHistory(actorName);
+    const reserved = getActorReservationHistory(actorName);
+    const costumeMap = new Map();
+
+    for (const r of borrowed) {
+      if (!costumeMap.has(r.costumeName)) {
+        costumeMap.set(r.costumeName, { name: r.costumeName, play: r.play, lastUsed: r.timestamp, type: '借出' });
+      }
+    }
+    for (const r of reserved) {
+      if (!costumeMap.has(r.costumeName)) {
+        costumeMap.set(r.costumeName, { name: r.costumeName, play: r.play, lastUsed: r.date, type: '预约' });
+      }
+    }
+
+    return [...costumeMap.values()].sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed));
+  }
+
+  function checkPlayMatch(costumePlay, actorPlays) {
+    if (!costumePlay || !actorPlays || !Array.isArray(actorPlays)) return { match: false, label: '剧目信息不足' };
+    if (actorPlays.includes(costumePlay)) return { match: true, label: `演员参演该剧目` };
+    return { match: false, label: `演员未参演该剧目` };
+  }
+
   function getActiveWorkOrder(costumeId) {
     return workOrders.find((wo) => wo.costumeId === costumeId && (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中'));
   }
@@ -1074,7 +1125,11 @@
     };
     reservations = [reservation, ...reservations];
     persistReservations();
-    addRecord('预约', costume, reservationForm.reservedFor.trim(), `预约「${costume.name}」于${reservationForm.date}，${reservationForm.type}：${reservationForm.reservedFor.trim()}`);
+    let recordSummary = `预约「${costume.name}」于${reservationForm.date}，${reservationForm.type}：${reservationForm.reservedFor.trim()}`;
+    if (reservationActor && reservationSizeMatch) {
+      recordSummary += `，尺码匹配：${reservationSizeMatch.label}`;
+    }
+    addRecord('预约', costume, reservationForm.reservedFor.trim(), recordSummary);
     closeReserve();
   }
 
@@ -1221,6 +1276,11 @@
   }).sort((a, b) => new Date(a.date) - new Date(b.date));
   $: reservingCostume = costumes.find((item) => item.id === reservingId);
   $: currentConflicts = reservingCostume ? checkConflict(reservingCostume.id, reservationForm.date) : [];
+  $: reservationActor = reservationForm.type === '演员' ? findActorByName(reservationForm.reservedFor) : null;
+  $: reservationActorSuggestions = reservationForm.type === '演员' ? searchActorsByName(reservationForm.reservedFor) : [];
+  $: reservationSizeMatch = reservingCostume && reservationActor ? matchSize(reservingCostume.size, reservationActor.size) : null;
+  $: reservationPlayMatch = reservingCostume && reservationActor ? checkPlayMatch(reservingCostume.play, reservationActor.plays) : null;
+  $: reservationActorHistory = reservationActor ? getActorCostumeHistory(reservationActor.name) : [];
   $: filteredActors = actors.filter((a) => {
     const text = `${a.name}${a.size}${(a.plays || []).join('')}${a.note}`;
     return text.includes(actorQuery.trim());
@@ -1228,6 +1288,12 @@
   $: selectedActor = actors.find((a) => a.id === selectedActorId);
   $: lendingActor = actors.find((a) => a.id === lendingActorId);
   $: lendingSizeMatch = lendingCostume && lendingActor ? matchSize(lendingCostume.size, lendingActor.size) : null;
+  $: lendingPlayMatch = lendingCostume && lendingActor ? checkPlayMatch(lendingCostume.play, lendingActor.plays) : null;
+  $: lendingActorByBorrower = findActorByName(lendingBorrower);
+  $: lendingBorrowerSuggestions = searchActorsByName(lendingBorrower);
+  $: lendingActorHistory = lendingActor || lendingActorByBorrower
+    ? getActorCostumeHistory((lendingActor || lendingActorByBorrower).name)
+    : [];
   $: filteredPackingLists = packingLists.filter((pl) => {
     const text = `${pl.name}${pl.play}${pl.performanceDate}`;
     const matchesQuery = text.includes(packingListQuery.trim());
@@ -1551,6 +1617,7 @@
         {reservations}
         {workOrders}
         {packingLists}
+        {actors}
         on:change={handleScheduleChange}
         on:generate-packing-list={handleGeneratePackingListFromSchedule}
       />
@@ -2211,18 +2278,38 @@
 
             {#if selectedActor.size}
               <div class="status-info">
-                <p><strong>尺码匹配建议：</strong></p>
+                <p><strong>推荐服装（在库可借）：</strong></p>
                 <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 6px;">
-                  {#each costumes.filter((c) => c.status === '在库' && c.clean === '已清洗').slice(0, 5) as costume}
-                    {@const m = matchSize(costume.size, selectedActor.size)}
+                  {#each costumes
+                    .filter((c) => c.status === '在库' && c.clean === '已清洗')
+                    .map((c) => ({ costume: c, match: matchSize(c.size, selectedActor.size) }))
+                    .sort((a, b) => Math.abs(a.match.diff) - Math.abs(b.match.diff))
+                    .slice(0, 5) as item}
                     <div class="actor-match-row">
-                      <span class="actor-match-costume">{costume.name} ({costume.size || '未填'})</span>
-                      <span class="match-badge {getMatchBadgeClass(m.level)}">{m.label}</span>
+                      <span class="actor-match-costume">{item.costume.name} ({item.costume.size || '未填'}) · {item.costume.play}</span>
+                      <span class="match-badge {getMatchBadgeClass(item.match.level)}">{item.match.label}</span>
                     </div>
                   {/each}
                   {#if costumes.filter((c) => c.status === '在库' && c.clean === '已清洗').length === 0}
                     <span style="color: #8a7665; font-size: 13px;">暂无可借出的服装</span>
                   {/if}
+                </div>
+              </div>
+            {/if}
+
+            {#if getActorCostumeHistory(selectedActor.name).length > 0}
+              <div class="status-info">
+                <p><strong>历史使用记录：</strong></p>
+                <div style="margin-top: 8px; display: flex; flex-direction: column; gap: 8px;">
+                  {#each getActorCostumeHistory(selectedActor.name).slice(0, 8) as hist}
+                    <div class="actor-history-row">
+                      <div class="actor-history-info">
+                        <span class="actor-history-costume">{hist.name}</span>
+                        <span class="record-play-tag">{hist.play}</span>
+                      </div>
+                      <span class="actor-history-type">{hist.type}</span>
+                    </div>
+                  {/each}
                 </div>
               </div>
             {/if}
@@ -2275,30 +2362,100 @@
               {/each}
             </select>
           </label>
-          {#if lendingActor && lendingSizeMatch}
-            <div class="size-match-box" class:match-perfect={lendingSizeMatch.level === 'perfect'} class:match-close={lendingSizeMatch.level === 'loose' || lendingSizeMatch.level === 'tight'} class:match-mismatch={lendingSizeMatch.level === 'mismatch'} class:match-unknown={lendingSizeMatch.level === 'unknown'}>
-              <div class="size-match-title">
-                {#if lendingSizeMatch.level === 'perfect'}
-                  <CheckCircle size={16} />
-                {:else if lendingSizeMatch.level === 'loose' || lendingSizeMatch.level === 'tight'}
-                  <AlertTriangle size={16} />
-                {:else if lendingSizeMatch.level === 'mismatch'}
-                  <XCircle size={16} />
-                {:else}
-                  <AlertTriangle size={16} />
-                {/if}
-                <strong>尺码匹配：{lendingSizeMatch.label}</strong>
-              </div>
-              <p class="size-match-detail">服装尺码：{lendingCostume.size || '未填'}，演员尺码：{lendingActor.size || '未填'}</p>
-              {#if lendingActor.note}
-                <p class="size-match-detail">演员备注：{lendingActor.note}</p>
-              {/if}
-            </div>
-          {/if}
           <label>
             <span>借用人</span>
             <input bind:value={lendingBorrower} placeholder="请输入借用人姓名" required />
+            {#if lendingBorrowerSuggestions.length > 0 && !lendingActorId && (lendingActorByBorrower?.name !== lendingBorrower.trim())}
+              <div class="actor-suggest-box">
+                {#each lendingBorrowerSuggestions.slice(0, 3) as sugg}
+                  <button type="button" class="actor-suggest-item" on:click={() => {
+                    lendingActorId = sugg.id;
+                    lendingBorrower = sugg.name;
+                  }}>
+                    <User size={14} />
+                    <span>{sugg.name}</span>
+                    <span class="actor-suggest-size">{sugg.size || '未填尺码'}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
           </label>
+
+          {#if lendingActor || lendingActorByBorrower}
+            {@const activeActor = lendingActor || lendingActorByBorrower}
+            {@const sizeMatch = lendingCostume && activeActor ? matchSize(lendingCostume.size, activeActor.size) : null}
+            {@const playMatch = lendingCostume && activeActor ? checkPlayMatch(lendingCostume.play, activeActor.plays) : null}
+            <div class="actor-match-panel">
+              <div class="actor-match-header">
+                <User size={16} />
+                <strong>演员档案：{activeActor.name}</strong>
+                {#if activeActor.size}
+                  <span class="match-badge {getMatchBadgeClass(sizeMatch?.level)}">{sizeMatch?.label || activeActor.size}</span>
+                {/if}
+              </div>
+
+              {#if sizeMatch}
+                <div class="size-match-row" class:match-perfect={sizeMatch.level === 'perfect'} class:match-close={sizeMatch.level === 'loose' || sizeMatch.level === 'tight'} class:match-mismatch={sizeMatch.level === 'mismatch'} class:match-unknown={sizeMatch.level === 'unknown'}>
+                  {#if sizeMatch.level === 'perfect'}
+                    <CheckCircle size={14} />
+                  {:else if sizeMatch.level === 'loose' || sizeMatch.level === 'tight'}
+                    <AlertTriangle size={14} />
+                  {:else if sizeMatch.level === 'mismatch'}
+                    <XCircle size={14} />
+                  {:else}
+                    <AlertTriangle size={14} />
+                  {/if}
+                  <span>尺码：服装 {lendingCostume.size || '未填'} / 演员 {activeActor.size || '未填'} — {sizeMatch.label}</span>
+                </div>
+              {/if}
+
+              {#if playMatch}
+                <div class="size-match-row" class:play-match={playMatch.match} class:play-mismatch={!playMatch.match}>
+                  {#if playMatch.match}
+                    <CheckCircle size={14} />
+                  {:else}
+                    <AlertTriangle size={14} />
+                  {/if}
+                  <span>剧目：{playMatch.label}</span>
+                </div>
+              {/if}
+
+              {#if activeActor.plays && activeActor.plays.length > 0}
+                <div class="actor-plays-row">
+                  <span class="label">参演剧目：</span>
+                  <div class="actor-plays-tags">
+                    {#each activeActor.plays as play}
+                      <span class="record-play-tag">{play}</span>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+
+              {#if activeActor.note}
+                <div class="actor-note-row">
+                  <span class="label">备注：</span>
+                  <span>{activeActor.note}</span>
+                </div>
+              {/if}
+
+              {#if lendingActorHistory.length > 0}
+                <div class="actor-history-section">
+                  <div class="actor-history-title">
+                    <Clock size={14} />
+                    <span>历史使用服装</span>
+                  </div>
+                  <div class="actor-history-list">
+                    {#each lendingActorHistory.slice(0, 5) as hist}
+                      <div class="actor-history-item">
+                        <span class="history-costume-name">{hist.name}</span>
+                        <span class="history-play-tag">{hist.play}</span>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/if}
           <div class="modal-actions">
             <button type="button" class="secondary" on:click={closeLend}>取消</button>
             <button type="submit" disabled={!lendingBorrower.trim()}><Clock size={16} />确认借出</button>
@@ -2347,11 +2504,97 @@
           <label>
             <span>{reservationForm.type === '演员' ? '演员姓名' : '场次名称'}</span>
             <input bind:value={reservationForm.reservedFor} placeholder={reservationForm.type === '演员' ? '请输入演员姓名' : '请输入场次名称'} required />
+            {#if reservationForm.type === '演员' && reservationActorSuggestions.length > 0 && !reservationActor}
+              <div class="actor-suggest-box">
+                {#each reservationActorSuggestions.slice(0, 3) as sugg}
+                  <button type="button" class="actor-suggest-item" on:click={() => {
+                    reservationForm.reservedFor = sugg.name;
+                  }}>
+                    <User size={14} />
+                    <span>{sugg.name}</span>
+                    <span class="actor-suggest-size">{sugg.size || '未填尺码'}</span>
+                  </button>
+                {/each}
+              </div>
+            {/if}
           </label>
           <label>
             <span>备注</span>
             <input bind:value={reservationForm.note} placeholder="选填" />
           </label>
+
+          {#if reservationForm.type === '演员' && reservationActor}
+            <div class="actor-match-panel">
+              <div class="actor-match-header">
+                <User size={16} />
+                <strong>演员档案：{reservationActor.name}</strong>
+                {#if reservationActor.size}
+                  <span class="match-badge {getMatchBadgeClass(reservationSizeMatch?.level)}">{reservationSizeMatch?.label || reservationActor.size}</span>
+                {/if}
+              </div>
+
+              {#if reservationSizeMatch}
+                <div class="size-match-row" class:match-perfect={reservationSizeMatch.level === 'perfect'} class:match-close={reservationSizeMatch.level === 'loose' || reservationSizeMatch.level === 'tight'} class:match-mismatch={reservationSizeMatch.level === 'mismatch'} class:match-unknown={reservationSizeMatch.level === 'unknown'}>
+                  {#if reservationSizeMatch.level === 'perfect'}
+                    <CheckCircle size={14} />
+                  {:else if reservationSizeMatch.level === 'loose' || reservationSizeMatch.level === 'tight'}
+                    <AlertTriangle size={14} />
+                  {:else if reservationSizeMatch.level === 'mismatch'}
+                    <XCircle size={14} />
+                  {:else}
+                    <AlertTriangle size={14} />
+                  {/if}
+                  <span>尺码：服装 {reservingCostume.size || '未填'} / 演员 {reservationActor.size || '未填'} — {reservationSizeMatch.label}</span>
+                </div>
+              {/if}
+
+              {#if reservationPlayMatch}
+                <div class="size-match-row" class:play-match={reservationPlayMatch.match} class:play-mismatch={!reservationPlayMatch.match}>
+                  {#if reservationPlayMatch.match}
+                    <CheckCircle size={14} />
+                  {:else}
+                    <AlertTriangle size={14} />
+                  {/if}
+                  <span>剧目：{reservationPlayMatch.label}</span>
+                </div>
+              {/if}
+
+              {#if reservationActor.plays && reservationActor.plays.length > 0}
+                <div class="actor-plays-row">
+                  <span class="label">参演剧目：</span>
+                  <div class="actor-plays-tags">
+                    {#each reservationActor.plays as play}
+                      <span class="record-play-tag">{play}</span>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+
+              {#if reservationActor.note}
+                <div class="actor-note-row">
+                  <span class="label">备注：</span>
+                  <span>{reservationActor.note}</span>
+                </div>
+              {/if}
+
+              {#if reservationActorHistory.length > 0}
+                <div class="actor-history-section">
+                  <div class="actor-history-title">
+                    <Clock size={14} />
+                    <span>历史使用服装</span>
+                  </div>
+                  <div class="actor-history-list">
+                    {#each reservationActorHistory.slice(0, 5) as hist}
+                      <div class="actor-history-item">
+                        <span class="history-costume-name">{hist.name}</span>
+                        <span class="history-play-tag">{hist.play}</span>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
+            </div>
+          {/if}
 
           {#if currentConflicts.length > 0}
             <div class="conflict-box">
@@ -3380,6 +3623,38 @@
   .actor-match-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px dashed #e4d8cc; }
   .actor-match-row:last-child { border-bottom: none; }
   .actor-match-costume { font-size: 13px; color: #3b2f26; }
+
+  .actor-match-panel { margin-top: 10px; padding: 12px 14px; background: #faf6f2; border: 1px solid #e4d8cc; border-radius: 8px; display: flex; flex-direction: column; gap: 10px; }
+  .actor-match-header { display: flex; align-items: center; gap: 8px; }
+  .actor-match-header strong { color: #26211c; font-size: 14px; }
+  .size-match-row { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 6px 10px; border-radius: 6px; }
+  .size-match-row.match-perfect { background: #eef6ee; color: #2d5a2d; }
+  .size-match-row.match-close { background: #fff4e6; color: #8a5a1a; }
+  .size-match-row.match-mismatch { background: #fdecea; color: #8a2d2d; }
+  .size-match-row.match-unknown { background: #f6efe7; color: #6b5a4d; }
+  .size-match-row.play-match { background: #eef6ee; color: #2d5a2d; }
+  .size-match-row.play-mismatch { background: #f6efe7; color: #6b5a4d; }
+  .actor-plays-row { display: flex; flex-direction: column; gap: 4px; }
+  .actor-plays-row > span:first-child { font-size: 12px; color: #8a7665; }
+  .actor-plays-list { display: flex; flex-wrap: wrap; gap: 4px; }
+  .actor-play-tag { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 4px; font-size: 12px; background: #e6eef6; color: #1a4a8a; font-weight: 500; }
+  .actor-note-row { display: flex; flex-direction: column; gap: 4px; }
+  .actor-note-row > span:first-child { font-size: 12px; color: #8a7665; }
+  .actor-note-row > span:last-child { font-size: 13px; color: #3b2f26; }
+
+  .actor-history-section { display: flex; flex-direction: column; gap: 8px; }
+  .actor-history-row { display: flex; justify-content: space-between; align-items: center; padding: 8px 10px; background: #fff; border: 1px solid #e4d8cc; border-radius: 6px; }
+  .actor-history-info { display: flex; align-items: center; gap: 8px; }
+  .actor-history-costume { font-size: 13px; color: #26211c; font-weight: 500; }
+  .actor-history-type { font-size: 11px; color: #8a7665; padding: 2px 6px; background: #f6efe7; border-radius: 4px; }
+
+  .actor-suggest-box { position: absolute; top: 100%; left: 0; right: 0; background: #fff; border: 1px solid #e4d8cc; border-radius: 8px; box-shadow: 0 6px 18px rgb(62 42 24 / .12); z-index: 100; overflow: hidden; }
+  .actor-suggest-item { display: flex; align-items: center; gap: 8px; padding: 10px 12px; width: 100%; text-align: left; border: none; background: none; cursor: pointer; border-bottom: 1px solid #f0e6dc; font-size: 14px; color: #26211c; }
+  .actor-suggest-item:hover { background: #faf6f2; }
+  .actor-suggest-item:last-child { border-bottom: none; }
+  .actor-suggest-size { margin-left: auto; font-size: 12px; color: #1a4a8a; background: #e6eef6; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
+  .lend-form label { position: relative; }
+
   @media (max-width: 900px) { main { padding: 16px; } .hero { align-items: start; flex-direction: column; } .layout, .toolbar, .record-toolbar, .actor-layout { grid-template-columns: 1fr; } .split { grid-template-columns: 1fr; } .modal { max-height: 95vh; } .modal-actions button { min-width: 100%; } .skipped-item { grid-template-columns: 50px 1fr; } .skipped-play { grid-column: 2; } .record-item { flex-direction: column; } .record-footer { flex-direction: column; align-items: flex-start; } .stats-grid { grid-template-columns: repeat(2, 1fr); } .stat-number { font-size: 22px; } .stat-card { padding: 12px; gap: 10px; } .stat-icon { width: 40px; height: 40px; } .actor-list { grid-template-columns: 1fr; } .packing-detail-summary { grid-template-columns: repeat(3, 1fr) !important; } .packing-modal { max-width: 100% !important; } .packing-costume-list { grid-template-columns: 1fr !important; } }
 
   .packing-list-item { align-items: center; }

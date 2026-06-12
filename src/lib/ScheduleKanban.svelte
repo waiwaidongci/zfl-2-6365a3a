@@ -26,6 +26,7 @@
   export let reservations = [];
   export let workOrders = [];
   export let packingLists = [];
+  export let actors = [];
 
   const dispatch = createEventDispatcher();
 
@@ -227,6 +228,60 @@
 
   function getLinkedCostumeDetails(linkedCostumeIds) {
     return costumes.filter((c) => (linkedCostumeIds || []).includes(c.id));
+  }
+
+  const sizeOrder = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
+
+  function parseSize(sizeStr) {
+    if (!sizeStr) return null;
+    const s = sizeStr.trim().toUpperCase();
+    const idx = sizeOrder.indexOf(s);
+    if (idx >= 0) return idx;
+    const numMatch = s.match(/(\d+)/);
+    if (numMatch) {
+      const num = parseInt(numMatch[1]);
+      if (num >= 150 && num <= 200) return Math.round((num - 150) / 10);
+    }
+    return null;
+  }
+
+  function matchSize(costumeSize, actorSize) {
+    const c = parseSize(costumeSize);
+    const a = parseSize(actorSize);
+    if (c === null || a === null) return { level: 'unknown', label: '尺码信息不全', diff: 0 };
+    const diff = c - a;
+    if (diff === 0) return { level: 'perfect', label: '尺码完全匹配', diff: 0 };
+    if (Math.abs(diff) === 1) return { level: diff > 0 ? 'loose' : 'tight', label: diff > 0 ? '服装稍大' : '服装稍小', diff };
+    return { level: 'mismatch', label: diff > 0 ? '服装过大' : '服装过小', diff };
+  }
+
+  function findActorByName(name) {
+    if (!name || !name.trim()) return null;
+    const trimmed = name.trim();
+    return actors.find((a) => a.name === trimmed) || null;
+  }
+
+  function getActorsForCostumeAndDate(costumeId, date) {
+    const dayReservations = reservations.filter(
+      (r) => r.costumeId === costumeId && r.date === date && r.status === 'active' && r.type === '演员'
+    );
+    const result = [];
+    for (const r of dayReservations) {
+      const actor = findActorByName(r.reservedFor);
+      result.push({
+        reservation: r,
+        actor,
+        sizeMatch: actor ? matchSize(costumes.find((c) => c.id === costumeId)?.size, actor.size) : null
+      });
+    }
+    return result;
+  }
+
+  function getMatchBadgeClass(level) {
+    if (level === 'perfect') return 'match-perfect';
+    if (level === 'loose' || level === 'tight') return 'match-close';
+    if (level === 'mismatch') return 'match-mismatch';
+    return 'match-unknown';
   }
 
   function addCostumeLink(costumeId) {
@@ -516,12 +571,30 @@
             }}>自动关联</button>
           </div>
           {#if scheduleForm.linkedCostumeIds.length > 0}
-            <div class="sk-linked-list">
+            <div class="sk-linked-costume-list">
               {#each getLinkedCostumeDetails(scheduleForm.linkedCostumeIds) as costume}
-                <span class="sk-costume-tag sk-costume-removable" on:click={() => removeCostumeLink(costume.id)}>
-                  <Shirt size={10} />{costume.name}
-                  <X size={10} />
-                </span>
+                {@const costumeActors = getActorsForCostumeAndDate(costume.id, scheduleForm.date)}
+                <div class="sk-linked-costume-item">
+                  <div class="sk-linked-costume-main">
+                    <span class="sk-linked-costume-name"><Shirt size={10} />{costume.name}</span>
+                    <span class="sk-linked-costume-size">{costume.size || '未填尺码'}</span>
+                  </div>
+                  {#if costumeActors.length > 0}
+                    <div class="sk-linked-costume-actors">
+                      {#each costumeActors as ca}
+                        <span class="sk-mini-actor">
+                          {ca.actor?.name || ca.reservation.reservedFor}
+                          {#if ca.sizeMatch}
+                            <span class="sk-mini-size-badge {getMatchBadgeClass(ca.sizeMatch.level)}">{ca.sizeMatch.label}</span>
+                          {/if}
+                        </span>
+                      {/each}
+                    </div>
+                  {/if}
+                  <button type="button" class="sk-remove-costume-btn" on:click={() => removeCostumeLink(costume.id)} aria-label="移除">
+                    <X size={12} />
+                  </button>
+                </div>
               {/each}
             </div>
           {:else}
@@ -535,9 +608,24 @@
           </div>
           <div class="sk-pick-list">
             {#each availableCostumesToLink.slice(0, 20) as costume}
+              {@const costumeActors = getActorsForCostumeAndDate(costume.id, scheduleForm.date)}
               <button type="button" class="sk-pick-card" on:click={() => addCostumeLink(costume.id)}>
-                <strong>{costume.name}</strong>
-                <span>{costume.play} · {costume.size || '未填'}</span>
+                <div class="sk-pick-card-main">
+                  <strong>{costume.name}</strong>
+                  <span>{costume.play} · {costume.size || '未填'}</span>
+                </div>
+                {#if costumeActors.length > 0}
+                  <div class="sk-pick-card-actors">
+                    {#each costumeActors.slice(0, 2) as ca}
+                      <span class="sk-mini-actor">
+                        {ca.actor?.name || ca.reservation.reservedFor}
+                        {#if ca.sizeMatch}
+                          <span class="sk-mini-size-badge {getMatchBadgeClass(ca.sizeMatch.level)}">{ca.sizeMatch.label}</span>
+                        {/if}
+                      </span>
+                    {/each}
+                  </div>
+                {/if}
                 <Plus size={14} class="sk-pick-add" />
               </button>
             {/each}
@@ -584,10 +672,23 @@
             <h3><Link2 size={14} />关联服装 ({detailLinkedCostumes.length})</h3>
             <div class="sk-detail-costumes">
               {#each detailLinkedCostumes as costume}
+                {@const costumeActors = getActorsForCostumeAndDate(costume.id, selectedSchedule.date)}
                 <div class="sk-detail-costume-row" class:sk-costume-borrowed={costume.status === '借出'} class:sk-costume-overdue={costume.status === '借出' && costume.due && costume.due < iso(0)}>
-                  <div>
+                  <div class="sk-costume-main-info">
                     <strong>{costume.name}</strong>
                     <span>{costume.play} · {costume.size || '未填'}</span>
+                    {#if costumeActors.length > 0}
+                      <div class="sk-costume-actors">
+                        {#each costumeActors as ca}
+                          <div class="sk-costume-actor-item">
+                            <span class="sk-actor-name">{ca.actor?.name || ca.reservation.reservedFor}</span>
+                            {#if ca.sizeMatch}
+                              <span class="sk-size-badge {getMatchBadgeClass(ca.sizeMatch.level)}">{ca.sizeMatch.label}</span>
+                            {/if}
+                          </div>
+                        {/each}
+                      </div>
+                    {/if}
                   </div>
                   <div class="sk-costume-status">
                     {#if costume.status === '借出'}
@@ -1165,6 +1266,57 @@
     transition: background .15s;
   }
   .sk-costume-removable:hover { background: #e0c9b8; }
+
+  .sk-costume-main-info { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 0; }
+  .sk-costume-actors { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 2px; }
+  .sk-costume-actor-item { display: inline-flex; align-items: center; gap: 4px; padding: 2px 6px; background: #f6efe7; border-radius: 4px; font-size: 11px; }
+  .sk-actor-name { color: #3b2f26; font-weight: 500; }
+  .sk-size-badge { display: inline-flex; align-items: center; padding: 1px 6px; border-radius: 3px; font-size: 10px; font-weight: 500; }
+  .sk-size-badge.match-perfect { background: #e6f0e6; color: #2d5a2d; }
+  .sk-size-badge.match-loose { background: #fff4e6; color: #8a5a1a; }
+  .sk-size-badge.match-tight { background: #fff4e6; color: #8a5a1a; }
+  .sk-size-badge.match-mismatch { background: #f6e6e6; color: #8a2d2d; }
+  .sk-size-badge.match-unknown { background: #f6efe7; color: #6b5a4d; }
+
+  .sk-mini-actor { display: inline-flex; align-items: center; gap: 3px; font-size: 10px; color: #6b5a4d; }
+  .sk-mini-size-badge { display: inline-flex; align-items: center; padding: 1px 5px; border-radius: 3px; font-size: 9px; font-weight: 500; }
+  .sk-mini-size-badge.match-perfect { background: #e6f0e6; color: #2d5a2d; }
+  .sk-mini-size-badge.match-loose { background: #fff4e6; color: #8a5a1a; }
+  .sk-mini-size-badge.match-tight { background: #fff4e6; color: #8a5a1a; }
+  .sk-mini-size-badge.match-mismatch { background: #f6e6e6; color: #8a2d2d; }
+  .sk-mini-size-badge.match-unknown { background: #f6efe7; color: #6b5a4d; }
+
+  .sk-linked-costume-list { display: flex; flex-direction: column; gap: 6px; }
+  .sk-linked-costume-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 8px 10px;
+    background: #fff;
+    border: 1px solid #e4d8cc;
+    border-radius: 6px;
+  }
+  .sk-linked-costume-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+  .sk-linked-costume-name { font-size: 13px; color: #26211c; font-weight: 500; display: flex; align-items: center; gap: 4px; }
+  .sk-linked-costume-size { font-size: 11px; color: #6b5a4d; }
+  .sk-linked-costume-actors { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
+  .sk-remove-costume-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    border: none;
+    background: #f6efe7;
+    color: #8a7665;
+    border-radius: 4px;
+    cursor: pointer;
+    flex-shrink: 0;
+    padding: 0;
+  }
+  .sk-remove-costume-btn:hover { background: #f0e6dc; color: #6b5a4d; }
+  .sk-pick-card-main { display: flex; flex-direction: column; gap: 2px; flex: 1; min-width: 0; }
+  .sk-pick-card-actors { display: flex; flex-wrap: wrap; gap: 3px; margin-top: 2px; }
 
   .sk-risk-list {
     margin-top: 10px;
