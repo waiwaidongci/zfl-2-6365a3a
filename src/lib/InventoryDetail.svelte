@@ -17,7 +17,11 @@
     FileText,
     ArrowLeft,
     Plus,
-    Undo2
+    Undo2,
+    CheckSquare,
+    Square,
+    ListChecks,
+    AlertCircle
   } from 'lucide-svelte';
   import {
     getInventoryTaskById,
@@ -56,6 +60,16 @@
   let processingWorkOrders = {};
   let processingReturns = {};
 
+  let batchMode = false;
+  let selectedItemIds = new Set();
+  let showBatchConfirmModal = false;
+  let batchActionType = null;
+  let batchActionNote = '';
+  let batchTargetLocation = '';
+  let isBatchProcessing = false;
+  let batchResult = null;
+  let discrepancyTypeFilter = '全部差异';
+
   function refreshData() {
     if (!taskId) return;
     task = getInventoryTaskById(taskId);
@@ -88,6 +102,18 @@
       item.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH ||
       item.actualStatus === INVENTORY_STATUS.STATUS_MISMATCH
   );
+
+  $: filteredDiscrepancyItems = discrepancyItems.filter((item) => {
+    if (discrepancyTypeFilter === '全部差异') return true;
+    if (discrepancyTypeFilter === '缺失') return item.actualStatus === INVENTORY_STATUS.MISSING;
+    if (discrepancyTypeFilter === '位置不符') return item.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH;
+    if (discrepancyTypeFilter === '状态不符') return item.actualStatus === INVENTORY_STATUS.STATUS_MISMATCH;
+    return true;
+  });
+
+  $: missingDiscrepancyCount = discrepancyItems.filter((i) => i.actualStatus === INVENTORY_STATUS.MISSING).length;
+  $: locationDiscrepancyCount = discrepancyItems.filter((i) => i.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH).length;
+  $: statusDiscrepancyCount = discrepancyItems.filter((i) => i.actualStatus === INVENTORY_STATUS.STATUS_MISMATCH).length;
 
   $: pendingCount = items.filter((i) => i.actualStatus === INVENTORY_STATUS.PENDING).length;
   $: normalCount = items.filter((i) => i.actualStatus === INVENTORY_STATUS.NORMAL).length;
@@ -296,7 +322,385 @@
     alert('已记录缺失情况');
   }
 
+  function toggleSelectItem(itemId) {
+    const newSet = new Set(selectedItemIds);
+    if (newSet.has(itemId)) {
+      newSet.delete(itemId);
+    } else {
+      newSet.add(itemId);
+    }
+    selectedItemIds = newSet;
+  }
+
+  function toggleSelectAll() {
+    const visibleIds = filteredDiscrepancyItems.map((item) => item.id);
+    const allVisibleSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedItemIds.has(id));
+    if (allVisibleSelected) {
+      const newSet = new Set(selectedItemIds);
+      visibleIds.forEach((id) => newSet.delete(id));
+      selectedItemIds = newSet;
+    } else {
+      const newSet = new Set(selectedItemIds);
+      visibleIds.forEach((id) => newSet.add(id));
+      selectedItemIds = newSet;
+    }
+  }
+
+  function getSelectedItems() {
+    return discrepancyItems.filter((item) => selectedItemIds.has(item.id));
+  }
+
+  function selectByType(type) {
+    const newSet = new Set(selectedItemIds);
+    discrepancyItems
+      .filter((item) => item.actualStatus === type)
+      .forEach((item) => newSet.add(item.id));
+    selectedItemIds = newSet;
+  }
+
+  function clearSelection() {
+    selectedItemIds = new Set();
+  }
+
+  function hasActiveWorkOrder(costumeId) {
+    const workOrders = getAll(TABLES.workOrders);
+    return workOrders.some((wo) =>
+      wo.costumeId === costumeId &&
+      (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中')
+    );
+  }
+
+  function getActiveWorkOrder(costumeId) {
+    const workOrders = getAll(TABLES.workOrders);
+    return workOrders.find((wo) =>
+      wo.costumeId === costumeId &&
+      (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中')
+    );
+  }
+
+  function openBatchAction(actionType) {
+    const selected = getSelectedItems();
+    if (selected.length === 0) {
+      alert('请先选择要处理的差异项');
+      return;
+    }
+    batchActionType = actionType;
+    batchActionNote = '';
+    batchTargetLocation = '';
+    batchResult = null;
+    showBatchConfirmModal = true;
+  }
+
+  function closeBatchConfirm() {
+    showBatchConfirmModal = false;
+    batchActionType = null;
+    batchActionNote = '';
+    batchTargetLocation = '';
+    isBatchProcessing = false;
+    batchResult = null;
+  }
+
+  function executeBatchAction() {
+    if (!batchActionType || isBatchProcessing) return;
+
+    const selected = getSelectedItems();
+    if (selected.length === 0) return;
+
+    isBatchProcessing = true;
+
+    setTimeout(() => {
+      let result;
+      if (batchActionType === 'clean' || batchActionType === 'repair') {
+        result = batchCreateWorkOrders(batchActionType === 'clean' ? '清洗' : '维修', selected);
+      } else if (batchActionType === 'updateLocation') {
+        result = batchUpdateLocations(selected);
+      } else if (batchActionType === 'return') {
+        result = batchReturnCostumes(selected);
+      }
+
+      batchResult = result;
+      isBatchProcessing = false;
+
+      if (result.successCount > 0) {
+        refreshData();
+        const event = new CustomEvent('inventory-updated');
+        document.dispatchEvent(event);
+      }
+    }, 100);
+  }
+
+  function batchCreateWorkOrders(type, items) {
+    const workOrders = getAll(TABLES.workOrders);
+    const costumes = getAll(TABLES.costumes);
+    const records = getAll(TABLES.records);
+
+    const newWorkOrders = [];
+    const updatedCostumes = [...costumes];
+    const newRecords = [];
+    let skippedCount = 0;
+    let successCount = 0;
+    const skippedItems = [];
+
+    const initialStatus = type === '清洗' ? '待清洗' : '待维修';
+    const defaultAssignee = type === '清洗' ? '张阿姨' : '李师傅';
+    const dueDateOffset = type === '清洗' ? 2 : 5;
+
+    items.forEach((item) => {
+      const costume = costumes.find((c) => c.id === item.costumeId);
+      if (!costume) {
+        skippedCount++;
+        skippedItems.push({ name: item.costumeName, reason: '服装档案不存在' });
+        return;
+      }
+
+      if (hasActiveWorkOrder(costume.id)) {
+        skippedCount++;
+        const activeWO = getActiveWorkOrder(costume.id);
+        skippedItems.push({ name: item.costumeName, reason: `已有未完成${activeWO.type}工单` });
+        return;
+      }
+
+      const dueDate = (() => {
+        const d = new Date();
+        d.setDate(d.getDate() + dueDateOffset);
+        return d.toISOString().slice(0, 10);
+      })();
+
+      const note = batchActionNote.trim() || `盘点差异处理：${item.actualStatus}`;
+
+      const workOrder = {
+        id: crypto.randomUUID(),
+        type,
+        costumeId: costume.id,
+        costumeName: costume.name,
+        play: costume.play,
+        status: initialStatus,
+        assignee: defaultAssignee,
+        dueDate,
+        note,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      newWorkOrders.push(workOrder);
+      successCount++;
+
+      const record = {
+        id: crypto.randomUUID(),
+        timestamp: new Date().toISOString(),
+        type: '工单创建',
+        costumeName: costume.name,
+        play: costume.play,
+        operator: '盘点批量',
+        summary: `批量创建${type}工单「${workOrder.id.slice(0, 8)}」，状态：${initialStatus}，负责人：${defaultAssignee}`
+      };
+      newRecords.push(record);
+
+      const costumeIdx = updatedCostumes.findIndex((c) => c.id === costume.id);
+      if (costumeIdx !== -1) {
+        const newCleanStatus = type === '清洗' ? '待清洗' : '维修中';
+        if (updatedCostumes[costumeIdx].clean !== newCleanStatus) {
+          updatedCostumes[costumeIdx] = { ...updatedCostumes[costumeIdx], clean: newCleanStatus };
+          const cleanRecord = {
+            id: crypto.randomUUID(),
+            timestamp: new Date().toISOString(),
+            type: '清洗',
+            costumeName: costume.name,
+            play: costume.play,
+            operator: '盘点批量',
+            summary: `「${costume.name}」${type === '清洗' ? '清洗状态' : '状态'}变更为「${newCleanStatus}」`
+          };
+          newRecords.push(cleanRecord);
+        }
+      }
+    });
+
+    setAll(TABLES.workOrders, [...newWorkOrders, ...workOrders]);
+    setAll(TABLES.costumes, updatedCostumes);
+    setAll(TABLES.records, [...newRecords, ...records]);
+
+    return {
+      successCount,
+      skippedCount,
+      skippedItems,
+      total: items.length,
+      action: `批量创建${type}工单`
+    };
+  }
+
+  function batchUpdateLocations(items) {
+    if (!batchTargetLocation.trim()) {
+      return { successCount: 0, skippedCount: items.length, skippedItems: items.map((i) => ({ name: i.costumeName, reason: '未指定目标位置' })), total: items.length, action: '批量更新位置' };
+    }
+
+    const costumes = getAll(TABLES.costumes);
+    const records = getAll(TABLES.records);
+
+    const updatedCostumes = [...costumes];
+    const newRecords = [];
+    let successCount = 0;
+    let skippedCount = 0;
+    const skippedItems = [];
+    const targetLocation = batchTargetLocation.trim();
+
+    items.forEach((item) => {
+      const costume = costumes.find((c) => c.id === item.costumeId);
+      if (!costume) {
+        skippedCount++;
+        skippedItems.push({ name: item.costumeName, reason: '服装档案不存在' });
+        return;
+      }
+
+      const costumeIdx = updatedCostumes.findIndex((c) => c.id === costume.id);
+      if (costumeIdx !== -1) {
+        const oldLocation = updatedCostumes[costumeIdx].location || '未设置';
+        updatedCostumes[costumeIdx] = { ...updatedCostumes[costumeIdx], location: targetLocation };
+        successCount++;
+
+        const record = {
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          type: '盘点',
+          costumeName: costume.name,
+          play: costume.play,
+          operator: '盘点批量',
+          summary: `「${costume.name}」位置从「${oldLocation}」更新为「${targetLocation}」`
+        };
+        newRecords.push(record);
+      }
+    });
+
+    setAll(TABLES.costumes, updatedCostumes);
+    setAll(TABLES.records, [...newRecords, ...records]);
+
+    return {
+      successCount,
+      skippedCount,
+      skippedItems,
+      total: items.length,
+      action: '批量更新位置',
+      targetLocation
+    };
+  }
+
+  function batchReturnCostumes(items) {
+    const costumes = getAll(TABLES.costumes);
+    const workOrders = getAll(TABLES.workOrders);
+    const records = getAll(TABLES.records);
+
+    const updatedCostumes = [...costumes];
+    const newWorkOrders = [];
+    const newRecords = [];
+    let successCount = 0;
+    let skippedCount = 0;
+    const skippedItems = [];
+
+    items.forEach((item) => {
+      const costume = costumes.find((c) => c.id === item.costumeId);
+      if (!costume) {
+        skippedCount++;
+        skippedItems.push({ name: item.costumeName, reason: '服装档案不存在' });
+        return;
+      }
+
+      if (costume.status !== '借出') {
+        skippedCount++;
+        skippedItems.push({ name: item.costumeName, reason: '当前不在借出状态' });
+        return;
+      }
+
+      const borrower = costume.borrower;
+      const costumeIdx = updatedCostumes.findIndex((c) => c.id === costume.id);
+      if (costumeIdx !== -1) {
+        updatedCostumes[costumeIdx] = {
+          ...updatedCostumes[costumeIdx],
+          borrower: '',
+          due: '',
+          status: '在库',
+          clean: '待清洗'
+        };
+        successCount++;
+
+        const returnRecord = {
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          type: '归还',
+          costumeName: costume.name,
+          play: costume.play,
+          operator: borrower,
+          summary: `${borrower}归还「${costume.name}」，状态变更为待清洗`
+        };
+        newRecords.push(returnRecord);
+
+        if (!hasActiveWorkOrder(costume.id)) {
+          const cleanWO = {
+            id: crypto.randomUUID(),
+            type: '清洗',
+            costumeId: costume.id,
+            costumeName: costume.name,
+            play: costume.play,
+            status: '待清洗',
+            assignee: '张阿姨',
+            dueDate: (() => {
+              const d = new Date();
+              d.setDate(d.getDate() + 2);
+              return d.toISOString().slice(0, 10);
+            })(),
+            note: `${borrower}归还后自动生成清洗工单`,
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString()
+          };
+          newWorkOrders.push(cleanWO);
+
+          const woRecord = {
+            id: crypto.randomUUID(),
+            timestamp: new Date().toISOString(),
+            type: '工单创建',
+            costumeName: costume.name,
+            play: costume.play,
+            operator: '盘点批量',
+            summary: `归还后自动生成清洗工单「${cleanWO.id.slice(0, 8)}」`
+          };
+          newRecords.push(woRecord);
+        }
+      }
+    });
+
+    setAll(TABLES.costumes, updatedCostumes);
+    setAll(TABLES.workOrders, [...newWorkOrders, ...workOrders]);
+    setAll(TABLES.records, [...newRecords, ...records]);
+
+    return {
+      successCount,
+      skippedCount,
+      skippedItems,
+      total: items.length,
+      action: '批量归还'
+    };
+  }
+
+  function closeBatchAfterDone() {
+    selectedItemIds = new Set();
+    batchMode = false;
+    closeBatchConfirm();
+  }
+
   $: selectedItem = items.find((i) => i.id === selectedItemId);
+
+  $: allVisibleSelected = filteredDiscrepancyItems.length > 0 && filteredDiscrepancyItems.every((i) => selectedItemIds.has(i.id));
+  $: allSelected = discrepancyItems.length > 0 && discrepancyItems.every((i) => selectedItemIds.has(i.id));
+  $: someVisibleSelected = filteredDiscrepancyItems.some((i) => selectedItemIds.has(i.id));
+  $: someSelected = selectedItemIds.size > 0;
+  $: selectedItemsForBatch = getSelectedItems();
+  $: selectedMissingCount = selectedItemsForBatch.filter((i) => i.actualStatus === INVENTORY_STATUS.MISSING).length;
+  $: selectedLocationCount = selectedItemsForBatch.filter((i) => i.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH).length;
+  $: selectedStatusCount = selectedItemsForBatch.filter((i) => i.actualStatus === INVENTORY_STATUS.STATUS_MISMATCH).length;
+  $: selectedItemsWithActiveWO = selectedItemsForBatch.filter((i) => hasActiveWorkOrder(i.costumeId)).length;
+  $: selectedItemsBorrowed = selectedItemsForBatch.filter((i) => {
+    const costumes = getAll(TABLES.costumes);
+    const c = costumes.find((cs) => cs.id === i.costumeId);
+    return c && c.status === '借出';
+  }).length;
 
   function getStatusClass(status) {
     if (status === INVENTORY_STATUS.NORMAL) return 'status-normal';
@@ -550,26 +954,131 @@
             </div>
           {:else}
             <div class="report-summary">
-              <h3>差异汇总</h3>
-              <p>共发现 <strong>{discrepancyItems.length}</strong> 项差异，请逐一处理</p>
+              <div class="report-summary-header">
+                <div>
+                  <h3>差异汇总</h3>
+                  <p>共发现 <strong>{discrepancyItems.length}</strong> 项差异{#if batchMode}，已选择 <strong>{selectedItemIds.size}</strong> 项{/if}</p>
+                </div>
+                <button type="button" class="batch-toggle-btn {batchMode ? 'active' : ''}" on:click={() => { batchMode = !batchMode; if (!batchMode) selectedItemIds = new Set(); }}>
+                  <ListChecks size={14} />
+                  {batchMode ? '退出批量' : '批量处理'}
+                </button>
+              </div>
+
+              <div class="discrepancy-filter-bar">
+                <div class="discrepancy-filter-label">差异类型筛选：</div>
+                <div class="discrepancy-filter-buttons">
+                  <button
+                    type="button"
+                    class="filter-chip {discrepancyTypeFilter === '全部差异' ? 'active' : ''}"
+                    on:click={() => discrepancyTypeFilter = '全部差异'}
+                  >
+                    全部 ({discrepancyItems.length})
+                  </button>
+                  <button
+                    type="button"
+                    class="filter-chip filter-missing {discrepancyTypeFilter === '缺失' ? 'active' : ''}"
+                    on:click={() => discrepancyTypeFilter = '缺失'}
+                  >
+                    缺失 ({missingDiscrepancyCount})
+                  </button>
+                  <button
+                    type="button"
+                    class="filter-chip filter-location {discrepancyTypeFilter === '位置不符' ? 'active' : ''}"
+                    on:click={() => discrepancyTypeFilter = '位置不符'}
+                  >
+                    位置不符 ({locationDiscrepancyCount})
+                  </button>
+                  <button
+                    type="button"
+                    class="filter-chip filter-status {discrepancyTypeFilter === '状态不符' ? 'active' : ''}"
+                    on:click={() => discrepancyTypeFilter = '状态不符'}
+                  >
+                    状态不符 ({statusDiscrepancyCount})
+                  </button>
+                </div>
+              </div>
+
+              {#if batchMode}
+                <div class="batch-toolbar">
+                  <button type="button" class="select-all-label" on:click={toggleSelectAll}>
+                    {#if allVisibleSelected}
+                      <CheckSquare size={16} class="check-icon checked" />
+                    {:else}
+                      <Square size={16} class="check-icon" />
+                    {/if}
+                    全选当前筛选 ({filteredDiscrepancyItems.length} 件)
+                  </button>
+                  <div class="batch-actions">
+                    <button
+                      type="button"
+                      class="batch-btn batch-clean"
+                      on:click={() => openBatchAction('clean')}
+                      disabled={!someSelected}
+                    >
+                      <Droplets size={14} />批量清洗
+                    </button>
+                    <button
+                      type="button"
+                      class="batch-btn batch-repair"
+                      on:click={() => openBatchAction('repair')}
+                      disabled={!someSelected}
+                    >
+                      <Wrench size={14} />批量维修
+                    </button>
+                    <button
+                      type="button"
+                      class="batch-btn batch-location"
+                      on:click={() => openBatchAction('updateLocation')}
+                      disabled={!someSelected}
+                    >
+                      <MapPin size={14} />更新位置
+                    </button>
+                    <button
+                      type="button"
+                      class="batch-btn batch-return"
+                      on:click={() => openBatchAction('return')}
+                      disabled={!someSelected}
+                    >
+                      <Undo2 size={14} />批量归还
+                    </button>
+                  </div>
+                </div>
+              {/if}
             </div>
 
             <div class="discrepancy-list">
-              {#each discrepancyItems as item}
-                <div class="discrepancy-card {getStatusClass(item.actualStatus)}">
+              {#each filteredDiscrepancyItems as item}
+                <div class="discrepancy-card {getStatusClass(item.actualStatus)} {selectedItemIds.has(item.id) ? 'selected' : ''}">
                   <div class="discrepancy-header">
-                    <div>
-                      <strong class="discrepancy-name">{item.costumeName}</strong>
-                      <span class="discrepancy-type {getStatusBadgeClass(item.actualStatus)}">
-                        {#if item.actualStatus === INVENTORY_STATUS.MISSING}
-                          <AlertOctagon size={12} />
-                        {:else if item.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH}
-                          <MapPin size={12} />
-                        {:else}
-                          <AlertTriangle size={12} />
-                        {/if}
-                        {item.actualStatus}
-                      </span>
+                    <div class="discrepancy-header-left">
+                      {#if batchMode}
+                        <button
+                          type="button"
+                          class="select-item-btn"
+                          on:click={() => toggleSelectItem(item.id)}
+                          aria-label={selectedItemIds.has(item.id) ? '取消选择' : '选择'}
+                        >
+                          {#if selectedItemIds.has(item.id)}
+                            <CheckSquare size={18} class="check-icon checked" />
+                          {:else}
+                            <Square size={18} class="check-icon" />
+                          {/if}
+                        </button>
+                      {/if}
+                      <div>
+                        <strong class="discrepancy-name">{item.costumeName}</strong>
+                        <span class="discrepancy-type {getStatusBadgeClass(item.actualStatus)}">
+                          {#if item.actualStatus === INVENTORY_STATUS.MISSING}
+                            <AlertOctagon size={12} />
+                          {:else if item.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH}
+                            <MapPin size={12} />
+                          {:else}
+                            <AlertTriangle size={12} />
+                          {/if}
+                          {item.actualStatus}
+                        </span>
+                      </div>
                     </div>
                     <span class="discrepancy-play">{item.costumePlay}</span>
                   </div>
@@ -801,6 +1310,209 @@
               {#if task.status === TASK_STATUS.IN_PROGRESS}
                 <button type="button" on:click={saveItemStatus}>
                   <Save size={16} />保存
+                </button>
+              {/if}
+            </div>
+          </div>
+        </div>
+      </div>
+    {/if}
+
+    {#if showBatchConfirmModal}
+      <div class="batch-modal-overlay" role="presentation" on:click={closeBatchConfirm}>
+        <div class="batch-modal" role="dialog" aria-modal="true" on:click|stopPropagation>
+          <div class="modal-header">
+            <h3>
+              {#if batchResult}
+                <CheckCircle size={18} />处理结果
+              {:else}
+                <AlertCircle size={18} />确认批量操作
+              {/if}
+            </h3>
+            <button type="button" class="icon-btn" on:click={batchResult ? closeBatchAfterDone : closeBatchConfirm} aria-label="关闭">
+              <X size={18} />
+            </button>
+          </div>
+          <div class="modal-body">
+            {#if !batchResult}
+              <div class="batch-summary">
+                <p class="batch-action-title">
+                  {#if batchActionType === 'clean'}
+                    <Droplets size={18} />批量创建清洗工单
+                  {:else if batchActionType === 'repair'}
+                    <Wrench size={18} />批量创建维修工单
+                  {:else if batchActionType === 'updateLocation'}
+                    <MapPin size={18} />批量更新服装位置
+                  {:else if batchActionType === 'return'}
+                    <Undo2 size={18} />批量归还借出服装
+                  {/if}
+                </p>
+                <p class="batch-count-info">
+                  已选择 <strong>{selectedItemIds.size}</strong> 项差异进行处理
+                </p>
+
+                <div class="batch-breakdown">
+                  <div class="breakdown-row">
+                    <span class="breakdown-label">
+                      <AlertOctagon size={12} class="icon-missing" />缺失
+                    </span>
+                    <span class="breakdown-value">{selectedMissingCount} 件</span>
+                  </div>
+                  <div class="breakdown-row">
+                    <span class="breakdown-label">
+                      <MapPin size={12} class="icon-location" />位置不符
+                    </span>
+                    <span class="breakdown-value">{selectedLocationCount} 件</span>
+                  </div>
+                  <div class="breakdown-row">
+                    <span class="breakdown-label">
+                      <AlertTriangle size={12} class="icon-status" />状态不符
+                    </span>
+                    <span class="breakdown-value">{selectedStatusCount} 件</span>
+                  </div>
+                </div>
+
+                {#if batchActionType === 'clean' || batchActionType === 'repair'}
+                  <div class="batch-warn-info">
+                    <div class="breakdown-row">
+                      <span class="breakdown-label">
+                        <CheckCircle size={12} class="icon-success" />可创建工单
+                      </span>
+                      <span class="breakdown-value success">{selectedItemsForBatch.length - selectedItemsWithActiveWO} 件</span>
+                    </div>
+                    {#if selectedItemsWithActiveWO > 0}
+                      <div class="breakdown-row">
+                        <span class="breakdown-label">
+                          <AlertTriangle size={12} class="icon-warn" />将跳过（已有未完成工单）
+                        </span>
+                        <span class="breakdown-value warn">{selectedItemsWithActiveWO} 件</span>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+
+                {#if batchActionType === 'return'}
+                  <div class="batch-warn-info">
+                    <div class="breakdown-row">
+                      <span class="breakdown-label">
+                        <CheckCircle size={12} class="icon-success" />可归还
+                      </span>
+                      <span class="breakdown-value success">{selectedItemsBorrowed} 件</span>
+                    </div>
+                    {#if selectedItemsForBatch.length - selectedItemsBorrowed > 0}
+                      <div class="breakdown-row">
+                        <span class="breakdown-label">
+                          <AlertTriangle size={12} class="icon-warn" />将跳过（非借出状态）
+                        </span>
+                        <span class="breakdown-value warn">{selectedItemsForBatch.length - selectedItemsBorrowed} 件</span>
+                      </div>
+                    {/if}
+                  </div>
+                {/if}
+              </div>
+
+              {#if batchActionType === 'updateLocation'}
+                <label class="batch-input">
+                  <span>目标位置</span>
+                  <input bind:value={batchTargetLocation} placeholder="请输入新的存放位置" />
+                </label>
+              {/if}
+
+              {#if batchActionType === 'clean' || batchActionType === 'repair'}
+                <label class="batch-input">
+                  <span>工单备注（选填）</span>
+                  <input bind:value={batchActionNote} placeholder="将作为所有工单的备注信息" />
+                </label>
+              {/if}
+
+              <div class="batch-preview">
+                <h5>涉及服装（共 {selectedItemsForBatch.length} 件）</h5>
+                <div class="batch-preview-list">
+                  {#each selectedItemsForBatch.slice(0, 10) as item}
+                    <div class="batch-preview-item">
+                      <span class="preview-name">{item.costumeName}</span>
+                      <span class="preview-type {getStatusBadgeClass(item.actualStatus)}">{item.actualStatus}</span>
+                    </div>
+                  {/each}
+                  {#if selectedItemsForBatch.length > 10}
+                    <div class="batch-more">...还有 {selectedItemsForBatch.length - 10} 件</div>
+                  {/if}
+                </div>
+              </div>
+
+              {#if batchActionType === 'clean' || batchActionType === 'repair'}
+                <div class="batch-hint warn">
+                  <AlertTriangle size={14} />
+                  <span>系统会自动跳过已有未完成{batchActionType === 'clean' ? '清洗' : '维修'}工单的服装</span>
+                </div>
+              {/if}
+
+              {#if batchActionType === 'return'}
+                <div class="batch-hint warn">
+                  <AlertTriangle size={14} />
+                  <span>仅处理当前处于借出状态的服装，归还后将自动生成清洗工单</span>
+                </div>
+              {/if}
+            {:else}
+              <div class="batch-result">
+                <div class="result-stats">
+                  <div class="result-stat success">
+                    <CheckCircle size={24} />
+                    <div>
+                      <div class="result-num">{batchResult.successCount}</div>
+                      <div class="result-label">成功处理</div>
+                    </div>
+                  </div>
+                  {#if batchResult.skippedCount > 0}
+                    <div class="result-stat skipped">
+                      <AlertOctagon size={24} />
+                      <div>
+                        <div class="result-num">{batchResult.skippedCount}</div>
+                        <div class="result-label">跳过</div>
+                      </div>
+                    </div>
+                  {/if}
+                </div>
+
+                {#if batchResult.skippedCount > 0 && batchResult.skippedItems.length > 0}
+                  <div class="skipped-list">
+                    <h5>跳过的项目</h5>
+                    <div class="skipped-items">
+                      {#each batchResult.skippedItems as skipped}
+                        <div class="skipped-item">
+                          <span class="skipped-name">{skipped.name}</span>
+                          <span class="skipped-reason">{skipped.reason}</span>
+                        </div>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+
+                <div class="batch-hint success">
+                  <CheckCircle size={14} />
+                  <span>所有操作已写入借还记录，相关数据已同步更新</span>
+                </div>
+              </div>
+            {/if}
+
+            <div class="modal-actions">
+              {#if !batchResult}
+                <button type="button" class="secondary" on:click={closeBatchConfirm}>取消</button>
+                <button
+                  type="button"
+                  class={batchActionType === 'return' ? '' : batchActionType === 'updateLocation' ? 'batch-location-btn' : ''}
+                  on:click={executeBatchAction}
+                  disabled={isBatchProcessing || (batchActionType === 'updateLocation' && !batchTargetLocation.trim())}
+                >
+                  {#if isBatchProcessing}
+                    <Clock size={16} />处理中...
+                  {:else}
+                    <CheckCheck size={16} />确认执行
+                  {/if}
+                </button>
+              {:else}
+                <button type="button" on:click={closeBatchAfterDone}>
+                  <CheckCircle size={16} />完成
                 </button>
               {/if}
             </div>
@@ -1644,6 +2356,535 @@
     .discrepancy-header {
       flex-direction: column;
       align-items: flex-start;
+    }
+  }
+
+  .report-summary-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 12px;
+  }
+
+  .discrepancy-filter-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: #faf6f2;
+    border-radius: 8px;
+    border: 1px solid #e4d8cc;
+    flex-wrap: wrap;
+  }
+
+  .discrepancy-filter-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: #3b2f26;
+    flex-shrink: 0;
+  }
+
+  .discrepancy-filter-buttons {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .filter-chip {
+    display: inline-flex;
+    align-items: center;
+    padding: 4px 10px;
+    border-radius: 16px;
+    border: 1px solid #d8c8ba;
+    background: #fff;
+    color: #6b5a4d;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+
+  .filter-chip:hover {
+    background: #f6efe7;
+    border-color: #c9b8a8;
+  }
+
+  .filter-chip.active {
+    background: #603d2d;
+    color: #fff;
+    border-color: #603d2d;
+  }
+
+  .filter-chip.filter-missing.active {
+    background: #8a2d2d;
+    border-color: #8a2d2d;
+  }
+
+  .filter-chip.filter-location.active {
+    background: #8a5a1a;
+    border-color: #8a5a1a;
+  }
+
+  .filter-chip.filter-status.active {
+    background: #1a4a8a;
+    border-color: #1a4a8a;
+  }
+
+  .batch-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 1px solid #d8c8ba;
+    background: #fff;
+    color: #6b5a4d;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .batch-toggle-btn:hover {
+    background: #faf6f2;
+  }
+
+  .batch-toggle-btn.active {
+    background: #603d2d;
+    color: #fff;
+    border-color: #603d2d;
+  }
+
+  .batch-toolbar {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    gap: 12px;
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: #faf6f2;
+    border-radius: 8px;
+    border: 1px solid #e4d8cc;
+    flex-wrap: wrap;
+  }
+
+  .select-all-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    color: #37261d;
+    font-weight: 500;
+    background: transparent;
+    border: 0;
+    padding: 0;
+    font: inherit;
+  }
+
+  .select-all-label:hover {
+    color: #603d2d;
+  }
+
+  .check-icon {
+    color: #b8a695;
+  }
+
+  .check-icon.checked {
+    color: #603d2d;
+  }
+
+  .batch-actions {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+  }
+
+  .batch-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 12px;
+    border-radius: 6px;
+    border: 0;
+    font-size: 12px;
+    font-weight: 500;
+    cursor: pointer;
+    color: #fff;
+  }
+
+  .batch-btn:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+  }
+
+  .batch-clean {
+    background: #5a7d9e;
+  }
+
+  .batch-clean:hover:not(:disabled) {
+    background: #4a6b8a;
+  }
+
+  .batch-repair {
+    background: #a0684c;
+  }
+
+  .batch-repair:hover:not(:disabled) {
+    background: #8a5b41;
+  }
+
+  .batch-location {
+    background: #8a5a1a;
+  }
+
+  .batch-location:hover:not(:disabled) {
+    background: #734a15;
+  }
+
+  .batch-return {
+    background: #4a7c4a;
+  }
+
+  .batch-return:hover:not(:disabled) {
+    background: #3d6b3d;
+  }
+
+  .discrepancy-card.selected {
+    border-color: #603d2d !important;
+    box-shadow: 0 0 0 2px rgb(96 61 45 / .15);
+  }
+
+  .discrepancy-header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 0;
+  }
+
+  .select-item-btn {
+    background: transparent;
+    border: 0;
+    padding: 2px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+
+  .batch-modal-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgb(38 33 28 / .6);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+    z-index: 350;
+  }
+
+  .batch-modal {
+    background: #fff;
+    border-radius: 12px;
+    width: 100%;
+    max-width: 520px;
+    max-height: 85vh;
+    overflow-y: auto;
+    box-shadow: 0 24px 60px rgb(38 33 28 / .35);
+  }
+
+  .batch-modal h3 {
+    margin: 0;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .batch-summary {
+    padding: 4px 0 12px;
+    border-bottom: 1px solid #e4d8cc;
+    margin-bottom: 12px;
+  }
+
+  .batch-action-title {
+    margin: 0 0 6px;
+    font-size: 15px;
+    font-weight: 600;
+    color: #26211c;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .batch-count-info {
+    margin: 0;
+    font-size: 13px;
+    color: #6b5a4d;
+  }
+
+  .batch-count-info strong {
+    color: #603d2d;
+    font-size: 15px;
+  }
+
+  .batch-breakdown {
+    margin-top: 12px 0 4px;
+    padding: 10px 12px;
+    background: #faf6f2;
+    border-radius: 8px;
+    border: 1px solid #e4d8cc;
+  }
+
+  .batch-warn-info {
+    margin-top: 8px 0 4px;
+    padding: 10px 12px;
+    background: #fff8f0;
+    border-radius: 8px;
+    border: 1px solid #e0c9a8;
+  }
+
+  .breakdown-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    font-size: 13px;
+  }
+
+  .breakdown-row + .breakdown-row {
+    border-top: 1px dashed #e4d8cc;
+    margin-top: 4px 0;
+    padding-top: 8px 0 4px;
+  }
+
+  .breakdown-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: #3b2f26;
+    font-weight: 500;
+  }
+
+  .breakdown-value {
+    font-weight: 600;
+    color: #26211c;
+  }
+
+  .breakdown-value.success {
+    color: #2d5a2d;
+  }
+
+  .breakdown-value.warn {
+    color: #8a5a1a;
+  }
+
+  .icon-missing { color: #8a2d2d; }
+  .icon-location { color: #8a5a1a; }
+  .icon-status { color: #1a4a8a; }
+  .icon-success { color: #2d5a2d; }
+  .icon-warn { color: #8a5a1a; }
+
+  .batch-input {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-bottom: 12px;
+  }
+
+  .batch-input span {
+    font-size: 13px;
+    font-weight: 500;
+    color: #3b2f26;
+  }
+
+  .batch-input input {
+    width: 100%;
+    border: 1px solid #d8c8ba;
+    border-radius: 8px;
+    padding: 10px 12px;
+    background: #fff;
+    color: #26211c;
+    font: inherit;
+    box-sizing: border-box;
+  }
+
+  .batch-preview {
+    margin: 12px 0;
+  }
+
+  .batch-preview h5 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: #3b2f26;
+    font-weight: 600;
+  }
+
+  .batch-preview-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 180px;
+    overflow-y: auto;
+    padding: 8px;
+    background: #faf6f2;
+    border-radius: 6px;
+  }
+
+  .batch-preview-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 8px;
+    font-size: 13px;
+  }
+
+  .preview-name {
+    color: #26211c;
+  }
+
+  .preview-type {
+    font-size: 11px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 500;
+  }
+
+  .batch-more {
+    text-align: center;
+    font-size: 12px;
+    color: #8a7665;
+    padding: 4px 0;
+  }
+
+  .batch-hint {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    font-size: 12px;
+    line-height: 1.5;
+    margin-top: 12px;
+  }
+
+  .batch-hint.warn {
+    background: #fff8f0;
+    color: #8a5a1a;
+    border: 1px solid #e0c9a8;
+  }
+
+  .batch-hint.success {
+    background: #f0f8f0;
+    color: #2d5a2d;
+    border: 1px solid #b8d8b8;
+  }
+
+  .batch-result {
+    padding: 4px 0;
+  }
+
+  .result-stats {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-bottom: 16px;
+  }
+
+  .result-stat {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px;
+    border-radius: 8px;
+  }
+
+  .result-stat.success {
+    background: #f0f8f0;
+    border: 1px solid #b8d8b8;
+    color: #2d5a2d;
+  }
+
+  .result-stat.skipped {
+    background: #fff8f0;
+    border: 1px solid #e0c9a8;
+    color: #8a5a1a;
+  }
+
+  .result-num {
+    font-size: 24px;
+    font-weight: 700;
+    line-height: 1.1;
+  }
+
+  .result-label {
+    font-size: 12px;
+    margin-top: 2px;
+  }
+
+  .skipped-list {
+    margin-bottom: 12px;
+  }
+
+  .skipped-list h5 {
+    margin: 0 0 8px;
+    font-size: 13px;
+    color: #3b2f26;
+    font-weight: 600;
+  }
+
+  .skipped-items {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    max-height: 150px;
+    overflow-y: auto;
+    padding: 8px;
+    background: #faf6f2;
+    border-radius: 6px;
+  }
+
+  .skipped-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 8px;
+    font-size: 12px;
+  }
+
+  .skipped-name {
+    color: #26211c;
+    font-weight: 500;
+  }
+
+  .skipped-reason {
+    color: #8a5a1a;
+    font-size: 11px;
+  }
+
+  .batch-location-btn {
+    background: #8a5a1a;
+    color: #fff;
+  }
+
+  .batch-location-btn:hover:not(:disabled) {
+    background: #734a15;
+  }
+
+  @media (max-width: 640px) {
+    .batch-toolbar {
+      flex-direction: column;
+      align-items: stretch;
+    }
+
+    .batch-actions {
+      justify-content: center;
+    }
+
+    .result-stats {
+      grid-template-columns: 1fr;
     }
   }
 </style>
