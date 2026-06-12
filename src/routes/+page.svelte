@@ -2812,6 +2812,7 @@
                   <th>服装名称</th>
                   <th>尺码</th>
                   <th>存放位置</th>
+                  <th>来源</th>
                   <th>状态</th>
                   <th>提示</th>
                   {#if !isPrintingPackingList}
@@ -2827,6 +2828,9 @@
                     <td><strong>{item.costumeName}</strong></td>
                     <td>{item.size || '-'}</td>
                     <td>{item.location || '-'}</td>
+                    <td>
+                      <span class="packing-source-badge">{item.source || '手动添加'}</span>
+                    </td>
                     <td>
                       <span class="packing-status-badge {getPackingStatusClass(item.status)}">
                         {#if item.status === '已打包'}<CheckCircle size={12} />
@@ -2870,7 +2874,7 @@
                 {/each}
                 {#if selectedPackingList.items.length === 0}
                   <tr>
-                    <td colspan={isPrintingPackingList ? 6 : 7} style="text-align: center; padding: 30px; color: #8a7665;">
+                    <td colspan={isPrintingPackingList ? 7 : 8} style="text-align: center; padding: 30px; color: #8a7665;">
                       <Package size={28} />
                       <p style="margin: 8px 0 0;">装箱单中暂无服装</p>
                     </td>
@@ -3465,6 +3469,7 @@
   .packing-status-badge.packing-status-clean { background: #e6eef6; color: #1a4a8a; }
   .packing-status-badge.packing-status-returned { background: #f0e6f6; color: #5a1a8a; }
   .packing-status-badge.packing-status-pending { background: #f6efe7; color: #6b5a4d; }
+  .packing-source-badge { display: inline-flex; align-items: center; padding: 3px 8px; border-radius: 6px; background: #f0e6dc; color: #6b5a4d; font-size: 12px; font-weight: 500; white-space: nowrap; }
   .packing-alerts-inline { display: flex; flex-direction: column; gap: 3px; }
   .packing-status-actions { display: flex; gap: 6px; }
   .small-select { width: auto; padding: 6px 8px; font-size: 12px; min-height: auto; }
