@@ -489,12 +489,22 @@
     if (!list) return;
     creatingPackingList = false;
     editingPackingListId = id;
+    const itemsWithRisks = list.items.map((item) => {
+      const alerts = getCostumeAlert(item.costumeId);
+      return {
+        ...item,
+        source: item.source || '手动添加',
+        risks: alerts || []
+      };
+    });
     packingListForm = {
       play: list.play,
       performanceDate: list.performanceDate,
       name: list.name,
       note: list.note,
-      items: [...list.items]
+      items: itemsWithRisks,
+      sourceScheduleId: list.sourceScheduleId || null,
+      generatedAt: list.generatedAt || null
     };
     packingAddCostumeQuery = '';
     packingAddCostumePlayFilter = list.play || '全部剧目';
@@ -560,7 +570,8 @@
       size: item.size,
       location: item.location,
       status: item.status,
-      note: item.note
+      note: item.note,
+      source: item.source || '手动添加'
     }));
 
     if (creatingPackingList) {

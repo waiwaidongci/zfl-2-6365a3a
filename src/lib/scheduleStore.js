@@ -240,8 +240,28 @@ export function autoLinkCostumes(schedule, costumes, reservations, packingLists)
   return [...linkedIds];
 }
 
+function normalizeDate(dateStr) {
+  if (!dateStr) return '';
+  const d = new Date(dateStr);
+  if (isNaN(d.getTime())) return '';
+  return d.toISOString().slice(0, 10);
+}
+
 export function generatePackingListFromSchedule(schedule, costumes, reservations, workOrders) {
   const collected = new Map();
+
+  const schedDateNorm = normalizeDate(schedule.date);
+  if (!schedDateNorm) {
+    return {
+      play: schedule.play,
+      performanceDate: schedule.date,
+      name: `${schedule.play} - ${schedule.date} 装箱单`,
+      note: `排期日期无效，无法生成装箱单`,
+      items: [],
+      sourceScheduleId: schedule.id,
+      generatedAt: new Date().toISOString()
+    };
+  }
 
   const linkedIds = schedule.linkedCostumeIds || [];
   for (const cid of linkedIds) {
@@ -251,8 +271,18 @@ export function generatePackingListFromSchedule(schedule, costumes, reservations
     }
   }
 
+  const schedDate = new Date(schedDateNorm);
+  const rangeStart = new Date(schedDate);
+  rangeStart.setDate(rangeStart.getDate() - 30);
+  const rangeStartStr = rangeStart.toISOString().slice(0, 10);
+  const rangeEnd = new Date(schedDate);
+  rangeEnd.setDate(rangeEnd.getDate() + 7);
+  const rangeEndStr = rangeEnd.toISOString().slice(0, 10);
+
   const dayReservations = reservations.filter(
-    (r) => r.status === 'active' && r.date === schedule.date
+    (r) => r.status === 'active' &&
+      r.play === schedule.play &&
+      normalizeDate(r.date) === schedDateNorm
   );
   for (const r of dayReservations) {
     const c = costumes.find((x) => x.id === r.costumeId);
@@ -264,7 +294,11 @@ export function generatePackingListFromSchedule(schedule, costumes, reservations
   }
 
   const playReservations = reservations.filter(
-    (r) => r.status === 'active' && r.play === schedule.play
+    (r) => r.status === 'active' &&
+      r.play === schedule.play &&
+      normalizeDate(r.date) !== schedDateNorm &&
+      normalizeDate(r.date) >= rangeStartStr &&
+      normalizeDate(r.date) < schedDateNorm
   );
   for (const r of playReservations) {
     const c = costumes.find((x) => x.id === r.costumeId);
