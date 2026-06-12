@@ -74,13 +74,6 @@
     showRiskStatusMenu = null;
   }
 
-  function formatDate(dateStr) {
-    if (!dateStr) return '';
-    const d = new Date(dateStr + 'T00:00:00');
-    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
-    return `${dateStr} ${weekdays[d.getDay()]}`;
-  }
-
   $: plays = ['全部剧目', ...new Set([
     ...schedules.map((s) => s.play).filter(Boolean),
     ...costumes.map((c) => c.play).filter(Boolean)
@@ -626,7 +619,8 @@
                     {:else}<Clock size={13} />{/if}
                     <span>{risk.message}</span>
                   </div>
-                  <div class="sk-risk-status-menu" on:click|stopPropagation>
+                  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                  <div class="sk-risk-status-menu" role="presentation" on:click|stopPropagation>
                     <button
                       type="button"
                       class="sk-risk-status-btn {getRiskStatusBadgeClass(risk.processingStatus)}"

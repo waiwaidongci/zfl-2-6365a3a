@@ -292,7 +292,8 @@
                     {/if}
                   </div>
                   <div class="rc-risk-actions">
-                    <div class="rc-status-menu" on:click|stopPropagation>
+                    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+                    <div class="rc-status-menu" role="presentation" on:click|stopPropagation>
                       <button
                         type="button"
                         class="rc-status-btn {getStatusBadgeClass(risk.processingStatus)}"
@@ -340,6 +341,7 @@
 
 {#if showDetailModal && selectedRisk}
   <div class="rc-modal-overlay" role="presentation" on:click={closeDetail}>
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
     <div class="rc-modal" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown={handleKeydown} tabindex="-1">
       <div class="rc-modal-header">
         <h2>风险详情</h2>
