@@ -1,4 +1,4 @@
-import { getAll, setAll, insertOne, updateOne, deleteOne, TABLES } from '$lib/database.js';
+import { getAll, setAll, insertOne, updateOne, updateOneWithEventType, deleteOne, TABLES, EVENT_TYPES } from '$lib/database.js';
 
 export const RISK_STATUS = {
   PENDING: '待处理',
@@ -34,10 +34,10 @@ export function saveRiskStatus(riskStatus) {
   const existing = getAllRiskStatuses();
   const idx = existing.findIndex((r) => r.riskKey === riskStatus.riskKey);
   if (idx >= 0) {
-    return updateOne(TABLES.riskStatuses, existing[idx].id, {
+    return updateOneWithEventType(TABLES.riskStatuses, existing[idx].id, {
       ...riskStatus,
       updatedAt: new Date().toISOString()
-    });
+    }, EVENT_TYPES.WORK_ORDER_PROCESS, `风险处理：${riskStatus.status || '更新'}`);
   } else {
     return insertOne(TABLES.riskStatuses, {
       ...riskStatus,
@@ -154,6 +154,7 @@ export function updateRiskProcessingStatus(riskKey, status, handler = '', note =
 
 export function addSchedule(schedule) {
   const schedules = getAllSchedules();
+  const now = new Date().toISOString();
   const newSchedule = {
     id: crypto.randomUUID(),
     play: schedule.play || '',
@@ -163,8 +164,8 @@ export function addSchedule(schedule) {
     status: schedule.status || '待确认',
     note: schedule.note || '',
     linkedCostumeIds: schedule.linkedCostumeIds || [],
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    createdAt: now,
+    updatedAt: now,
     ...schedule
   };
   if (!newSchedule.id) newSchedule.id = crypto.randomUUID();
@@ -174,12 +175,10 @@ export function addSchedule(schedule) {
 }
 
 export function updateSchedule(id, updates) {
-  const schedules = getAllSchedules();
-  const idx = schedules.findIndex((s) => s.id === id);
-  if (idx === -1) return null;
-  schedules[idx] = { ...schedules[idx], ...updates, updatedAt: new Date().toISOString() };
-  saveAllSchedules(schedules);
-  return schedules[idx];
+  return updateOneWithEventType(TABLES.schedules, id, {
+    ...updates,
+    updatedAt: new Date().toISOString()
+  }, EVENT_TYPES.SCHEDULE_CHANGE, '排期修改');
 }
 
 export function deleteSchedule(id) {

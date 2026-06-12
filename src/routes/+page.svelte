@@ -7,6 +7,7 @@
     setAll,
     insertOne,
     updateOne,
+    updateOneWithEventType,
     deleteOne,
     downloadBackup,
     readBackupFile,
@@ -19,8 +20,10 @@
     getFullDB,
     saveFullDB,
     updateLastMergeAt,
+    recordSyncEvent,
     TABLES,
-    TABLE_LABELS
+    TABLE_LABELS,
+    EVENT_TYPES
   } from '$lib/database.js';
   import ScheduleKanban from '$lib/ScheduleKanban.svelte';
   import RiskCenter from '$lib/RiskCenter.svelte';
@@ -236,6 +239,10 @@
 
   let localStorageAvailable = typeof localStorage !== 'undefined';
 
+  function deepClone(obj) {
+    return JSON.parse(JSON.stringify(obj));
+  }
+
   function persist() {
     setAll(TABLES.costumes, costumes);
   }
@@ -415,7 +422,7 @@
       const currentDB = getFullDB();
       const { db: mergedDB, costumeIdMap } = applyMerge(currentDB, mergeImportDB, mergeDiffResult, finalDecisions);
       saveFullDB(mergedDB);
-      updateLastMergeAt();
+      updateLastMergeAt(mergeImportDB._meta);
       const fresh = initializeDatabase();
       costumes = fresh.tables[TABLES.costumes] || [];
       records = fresh.tables[TABLES.records] || [];
@@ -559,25 +566,51 @@
   }
 
   function updatePackingItemStatus(listId, costumeId, status) {
-    packingLists = packingLists.map((pl) => {
-      if (pl.id !== listId) return pl;
-      return {
-        ...pl,
-        items: pl.items.map((item) => item.costumeId === costumeId ? { ...item, status } : item)
-      };
-    });
-    persistPackingLists();
+    const list = packingLists.find((pl) => pl.id === listId);
+    if (!list) return;
+    const newList = {
+      ...list,
+      items: list.items.map((item) => item.costumeId === costumeId ? { ...item, status } : item)
+    };
+    const db = getFullDB();
+    const idx = db.tables[TABLES.packingLists].findIndex((pl) => pl.id === listId);
+    if (idx !== -1) {
+      const before = deepClone(db.tables[TABLES.packingLists][idx]);
+      db.tables[TABLES.packingLists][idx] = { ...newList, updatedAt: new Date().toISOString() };
+      const after = db.tables[TABLES.packingLists][idx];
+      recordSyncEvent(db, TABLES.packingLists, EVENT_TYPES.PACKING_STATUS, listId, {
+        before,
+        after: deepClone(after),
+        changedFields: ['items'],
+        note: `装箱状态更新：${costumeId.slice(0, 8)} -> ${status}`
+      });
+      saveFullDB(db);
+    }
+    packingLists = packingLists.map((pl) => pl.id === listId ? newList : pl);
   }
 
   function updatePackingItemNote(listId, costumeId, note) {
-    packingLists = packingLists.map((pl) => {
-      if (pl.id !== listId) return pl;
-      return {
-        ...pl,
-        items: pl.items.map((item) => item.costumeId === costumeId ? { ...item, note } : item)
-      };
-    });
-    persistPackingLists();
+    const list = packingLists.find((pl) => pl.id === listId);
+    if (!list) return;
+    const newList = {
+      ...list,
+      items: list.items.map((item) => item.costumeId === costumeId ? { ...item, note } : item)
+    };
+    const db = getFullDB();
+    const idx = db.tables[TABLES.packingLists].findIndex((pl) => pl.id === listId);
+    if (idx !== -1) {
+      const before = deepClone(db.tables[TABLES.packingLists][idx]);
+      db.tables[TABLES.packingLists][idx] = { ...newList, updatedAt: new Date().toISOString() };
+      const after = db.tables[TABLES.packingLists][idx];
+      recordSyncEvent(db, TABLES.packingLists, EVENT_TYPES.PACKING_STATUS, listId, {
+        before,
+        after: deepClone(after),
+        changedFields: ['items'],
+        note: `装箱备注更新：${costumeId.slice(0, 8)}`
+      });
+      saveFullDB(db);
+    }
+    packingLists = packingLists.map((pl) => pl.id === listId ? newList : pl);
   }
 
   function savePackingList() {

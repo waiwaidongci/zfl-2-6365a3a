@@ -1,4 +1,4 @@
-import { getAll, setAll, insertOne, updateOne, deleteOne, TABLES } from '$lib/database.js';
+import { getAll, setAll, insertOne, updateOne, updateOneWithEventType, deleteOne, TABLES, EVENT_TYPES, startEventBatch, endEventBatch } from '$lib/database.js';
 
 export const INVENTORY_STATUS = {
   PENDING: '待盘点',
@@ -49,42 +49,50 @@ export function createInventoryTask(name, note = '', playFilter = '全部剧目'
     locationMismatchCount: 0,
     statusMismatchCount: 0,
     createdAt: now,
+    updatedAt: now,
     completedAt: null
   };
 
   insertOne(TABLES.inventoryTasks, task);
 
-  const items = filteredCostumes.map((costume) => ({
-    id: crypto.randomUUID(),
-    taskId,
-    costumeId: costume.id,
-    costumeName: costume.name,
-    costumeSize: costume.size || '',
-    costumePlay: costume.play,
-    expectedLocation: costume.location || '',
-    expectedStatus: costume.status || '在库',
-    expectedClean: costume.clean || '已清洗',
-    actualStatus: INVENTORY_STATUS.PENDING,
-    actualLocation: '',
-    actualClean: '',
-    note: '',
-    checkedAt: null
-  }));
+  startEventBatch();
+  try {
+    const items = filteredCostumes.map((costume) => ({
+      id: crypto.randomUUID(),
+      taskId,
+      costumeId: costume.id,
+      costumeName: costume.name,
+      costumeSize: costume.size || '',
+      costumePlay: costume.play,
+      expectedLocation: costume.location || '',
+      expectedStatus: costume.status || '在库',
+      expectedClean: costume.clean || '已清洗',
+      actualStatus: INVENTORY_STATUS.PENDING,
+      actualLocation: '',
+      actualClean: '',
+      note: '',
+      checkedAt: null,
+      createdAt: now,
+      updatedAt: now
+    }));
 
-  const allItems = getAll(TABLES.inventoryItems);
-  setAll(TABLES.inventoryItems, [...items, ...allItems]);
+    const allItems = getAll(TABLES.inventoryItems);
+    setAll(TABLES.inventoryItems, [...items, ...allItems]);
+  } finally {
+    endEventBatch();
+  }
 
   return task;
 }
 
 export function updateInventoryItemStatus(itemId, status, actualLocation = '', actualClean = '', note = '') {
-  const item = updateOne(TABLES.inventoryItems, itemId, {
+  const item = updateOneWithEventType(TABLES.inventoryItems, itemId, {
     actualStatus: status,
     actualLocation,
     actualClean,
     note,
     checkedAt: new Date().toISOString()
-  });
+  }, EVENT_TYPES.INVENTORY_CHECK, `盘点结果：${status}`);
 
   if (item) {
     recalculateTaskStats(item.taskId);

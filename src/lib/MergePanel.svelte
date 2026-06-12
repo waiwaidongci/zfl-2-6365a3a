@@ -1,6 +1,6 @@
 <script>
-  import { X, AlertTriangle, CheckCircle, Plus, Minus, ChevronDown, ChevronRight, Save, ArrowRightLeft, Database, RefreshCw, CheckCircle2, XCircle, Edit3 } from 'lucide-svelte';
-  import { TABLES, TABLE_LABELS } from '$lib/database.js';
+  import { X, AlertTriangle, CheckCircle, Plus, Minus, ChevronDown, ChevronRight, Save, ArrowRightLeft, Database, RefreshCw, CheckCircle2, XCircle, Edit3, Clock, Cpu, GitBranch, Activity } from 'lucide-svelte';
+  import { TABLES, TABLE_LABELS, EVENT_TYPE_LABELS } from '$lib/database.js';
   import {
     DIFF_TYPES,
     DIFF_LABELS,
@@ -22,6 +22,7 @@
   let activeTable = TABLES.costumes;
   let activeFilter = DIFF_TYPES.FIELD_CONFLICT;
   let expandedItems = new Set();
+  let expandedTimelines = new Set();
   let manualEditItem = null;
   let manualEditTable = null;
   let manualMergeData = {};
@@ -30,17 +31,53 @@
   $: pendingCount = pending.length;
   $: canProceed = pendingCount === 0;
   $: activeFilterItems = diffResult.tables?.[activeTable]?.[activeFilter] || [];
+  $: currentMeta = diffResult?.currentMeta || null;
+  $: deviceStats = getDeviceStats(diffResult);
 
   const TABLE_ORDER = MERGE_TABLES;
 
   const FILTER_ORDER = [
     DIFF_TYPES.FIELD_CONFLICT,
+    DIFF_TYPES.EVENT_BASED_RESOLVABLE,
     DIFF_TYPES.DELETED_SUSPECT,
     DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT,
     DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT,
     DIFF_TYPES.ADDED,
     DIFF_TYPES.IDENTICAL
   ];
+
+  function getDeviceStats(dr) {
+    if (!dr?.timeline) return { current: 0, import: 0, total: 0 };
+    let cur = 0, imp = 0;
+    for (const e of dr.timeline) {
+      if (e.side === 'current') cur++;
+      else imp++;
+    }
+    return { current: cur, import: imp, total: cur + imp };
+  }
+
+  function formatEventTime(ts) {
+    if (!ts) return '';
+    const d = new Date(ts);
+    return d.toLocaleString('zh-CN', { hour12: false });
+  }
+
+  function getSideClass(side) {
+    return side === 'current' ? 'timeline-current' : 'timeline-import';
+  }
+
+  function getSideLabel(side) {
+    return side === 'current' ? '当前设备' : '导入设备';
+  }
+
+  function toggleTimeline(id) {
+    if (expandedTimelines.has(id)) {
+      expandedTimelines.delete(id);
+    } else {
+      expandedTimelines.add(id);
+    }
+    expandedTimelines = new Set(expandedTimelines);
+  }
 
   function getRecordTitle(table, record) {
     if (!record) return '(无)';
@@ -76,6 +113,8 @@
         return 'diff-cur-mod';
       case DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT:
         return 'diff-imp-mod';
+      case DIFF_TYPES.EVENT_BASED_RESOLVABLE:
+        return 'diff-event';
       default:
         return '';
     }
@@ -107,6 +146,22 @@
         }
       }
     };
+  }
+
+  function applyAutoMergedSuggestion(table, id, item) {
+    const dec = decisions[table]?.[id];
+    if (dec?.autoMergedData) {
+      decisions = {
+        ...decisions,
+        [table]: {
+          ...(decisions[table] || {}),
+          [id]: {
+            choice: DECISION_CHOICES.MANUAL,
+            mergedData: deepClone(dec.autoMergedData)
+          }
+        }
+      };
+    }
   }
 
   function startManualEdit(table, item) {
@@ -189,7 +244,8 @@
       const td = diffResult.tables[table];
       const conflicts = [
         ...td[DIFF_TYPES.FIELD_CONFLICT],
-        ...td[DIFF_TYPES.DELETED_SUSPECT]
+        ...td[DIFF_TYPES.DELETED_SUSPECT],
+        ...td[DIFF_TYPES.EVENT_BASED_RESOLVABLE]
       ];
       for (const item of conflicts) {
         const dec = decisions[table]?.[item.id];
@@ -198,6 +254,10 @@
         }
       }
     }
+  }
+
+  function deepClone(obj) {
+    return JSON.parse(JSON.stringify(obj));
   }
 </script>
 
@@ -211,9 +271,25 @@
           · 来源设备：<code>{importMeta.deviceId}</code>
         {/if}
         {#if importMeta?.exportedAt}
-          · 导出时间：{importMeta.exportedAt}
+          · 导出时间：{formatEventTime(importMeta.exportedAt)}
         {/if}
       </p>
+      {#if deviceStats.total > 0}
+        <div class="device-stats-row">
+          <span class="device-stat">
+            <Cpu size={12} class="stat-icon cur" />
+            当前设备 {currentMeta?.deviceId || '(未知)'}：<strong>{deviceStats.current}</strong> 条变更事件
+          </span>
+          <span class="device-stat">
+            <Cpu size={12} class="stat-icon imp" />
+            导入设备 {importMeta?.deviceId || '(未知)'}：<strong>{deviceStats.import}</strong> 条变更事件
+          </span>
+          <span class="device-stat total">
+            <Activity size={12} class="stat-icon" />
+            合计 {deviceStats.total} 条同步事件
+          </span>
+        </div>
+      {/if}
     </div>
     <button type="button" class="icon-btn" on:click={onClose} aria-label="关闭"><X size={20} /></button>
   </div>
@@ -336,6 +412,43 @@
 
             {#if isExpanded}
               <div class="diff-body">
+
+                {#if item.timelineAnalysis?.autoReason && activeFilter !== DIFF_TYPES.IDENTICAL && activeFilter !== DIFF_TYPES.ADDED}
+                  <div class="event-analysis-banner {item.timelineAnalysis.canAutoResolve ? 'info' : 'warning'}">
+                    <GitBranch size={14} />
+                    <span>
+                      <strong>事件时间线分析：</strong>
+                      {item.timelineAnalysis.autoReason}
+                    </span>
+                    {#if item.timelineAnalysis.conflictSources && item.timelineAnalysis.conflictSources.length > 0}
+                      <span class="conflict-fields-tag">
+                        冲突字段：{item.timelineAnalysis.conflictSources.join('、').replace('__existence__', '存在状态')}
+                      </span>
+                    {/if}
+                  </div>
+                {/if}
+
+                {#if activeFilter === DIFF_TYPES.EVENT_BASED_RESOLVABLE}
+                  <div class="event-suggestion-box">
+                    <Activity size={14} />
+                    <div class="suggestion-content">
+                      <strong>双向合并建议</strong>
+                      <p class="suggestion-hint">双方修改了不同字段，系统建议双向合并。点击"应用建议"自动合并，或手动选择保留方向。</p>
+                      {#if decisions[activeTable]?.[item.id]?.autoReason}
+                        <p class="suggestion-reason">{decisions[activeTable][item.id].autoReason}</p>
+                      {/if}
+                      <button
+                        type="button"
+                        class="apply-suggestion-btn"
+                        on:click={() => applyAutoMergedSuggestion(activeTable, item.id, item)}
+                        disabled={!decisions[activeTable]?.[item.id]?.autoMergedData}
+                      >
+                        <GitBranch size={12} />应用双向合并建议
+                      </button>
+                    </div>
+                  </div>
+                {/if}
+
                 {#if activeFilter === DIFF_TYPES.ADDED}
                   <div class="side-by-side">
                     <div class="side side-import">
@@ -394,6 +507,53 @@
                       </tbody>
                     </table>
                   </div>
+                {/if}
+
+                {#if item.timelineAnalysis?.hasEvents}
+                  <button
+                    type="button"
+                    class="timeline-toggle"
+                    on:click={() => toggleTimeline(item.id)}
+                  >
+                    {#if expandedTimelines.has(item.id)}
+                      <ChevronDown size={14} />
+                    {:else}
+                      <ChevronRight size={14} />
+                    {/if}
+                    <Clock size={14} />
+                    <span>查看变更事件时间线（{item.timelineAnalysis.allEvents.length} 条）</span>
+                  </button>
+                  {#if expandedTimelines.has(item.id)}
+                    <div class="timeline-container">
+                      {#each item.timelineAnalysis.allEvents as event}
+                        <div class="timeline-item {getSideClass(event.side)}">
+                          <div class="timeline-dot"></div>
+                          <div class="timeline-content">
+                            <div class="timeline-header">
+                              <span class="timeline-side-tag">{getSideLabel(event.side)}</span>
+                              <span class="timeline-event-type">
+                                {EVENT_TYPE_LABELS[event.eventType] || event.eventType}
+                              </span>
+                              <span class="timeline-device">{event.deviceId}</span>
+                            </div>
+                            <div class="timeline-time">
+                              <Clock size={11} />
+                              {formatEventTime(event.timestamp)}
+                              {event.syncCounter ? ` · #${event.syncCounter}` : ''}
+                            </div>
+                            {#if event.note}
+                              <div class="timeline-note">{event.note}</div>
+                            {/if}
+                            {#if event.changedFields && event.changedFields.length > 0}
+                              <div class="timeline-fields">
+                                变更字段：{event.changedFields.join('、')}
+                              </div>
+                            {/if}
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
                 {/if}
 
                 {#if needsDecision}
@@ -802,4 +962,197 @@
   }
   .footer-actions button:not(.secondary):not(:disabled):hover { background: #6b4430; }
   .footer-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .device-stats-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    margin-top: 8px;
+  }
+  .device-stat {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    background: #faf6f0;
+    border-radius: 12px;
+    font-size: 12px;
+    color: #4a3a2a;
+  }
+  .device-stat.total {
+    background: #eef0e6;
+    color: #5a6a2d;
+  }
+  .stat-icon.cur { color: #1a4a8a; }
+  .stat-icon.imp { color: #2d5a2d; }
+
+  .event-analysis-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+    border-radius: 6px;
+    margin-bottom: 12px;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+  .event-analysis-banner.info {
+    background: #eef4fa;
+    color: #1a4a8a;
+    border: 1px solid #bcd;
+  }
+  .event-analysis-banner.warning {
+    background: #fff4e6;
+    color: #8a5a1a;
+    border: 1px solid #ffe0bf;
+  }
+  .event-analysis-banner strong {
+    white-space: nowrap;
+  }
+  .conflict-fields-tag {
+    margin-left: 8px;
+    padding: 1px 8px;
+    background: rgba(0,0,0,0.08);
+    border-radius: 10px;
+    font-size: 11px;
+  }
+
+  .event-suggestion-box {
+    display: flex;
+    gap: 10px;
+    padding: 12px;
+    background: #f0eef6;
+    border: 1px solid #d4c9e8;
+    border-radius: 6px;
+    margin-bottom: 12px;
+  }
+  .event-suggestion-box > :first-child {
+    color: #6a2d6a;
+    flex-shrink: 0;
+    margin-top: 2px;
+  }
+  .suggestion-content { flex: 1; font-size: 13px; color: #4a3a5a; }
+  .suggestion-content strong { color: #6a2d6a; display: block; margin-bottom: 4px; }
+  .suggestion-hint { margin: 0 0 4px; color: #6a5a7a; }
+  .suggestion-reason { margin: 0 0 8px; font-size: 12px; color: #8a7a9a; }
+  .apply-suggestion-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 5px 12px;
+    background: #6a2d6a;
+    color: #fff;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+  }
+  .apply-suggestion-btn:hover:not(:disabled) { background: #5a1d5a; }
+  .apply-suggestion-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  .timeline-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    padding: 6px 10px;
+    background: #faf6f0;
+    border: 1px solid #e8dfd2;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 12px;
+    color: #4a3a2a;
+    font-family: inherit;
+    margin: 10px 0 6px;
+  }
+  .timeline-toggle:hover { background: #f0e6d6; }
+
+  .timeline-container {
+    margin: 6px 0 12px;
+    padding: 10px 12px 10px 20px;
+    background: #faf6f0;
+    border-radius: 6px;
+    border: 1px solid #e8dfd2;
+  }
+  .timeline-item {
+    position: relative;
+    padding: 6px 0 6px 14px;
+    margin-left: 8px;
+    border-left: 2px solid #d4b896;
+  }
+  .timeline-item.timeline-current {
+    border-left-color: #4d76a8;
+  }
+  .timeline-item.timeline-import {
+    border-left-color: #4d8a4d;
+  }
+  .timeline-dot {
+    position: absolute;
+    left: -7px;
+    top: 12px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: #d4b896;
+    border: 2px solid #fff;
+  }
+  .timeline-current .timeline-dot { background: #4d76a8; }
+  .timeline-import .timeline-dot { background: #4d8a4d; }
+
+  .timeline-content { font-size: 12px; color: #4a3a2a; }
+  .timeline-header {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 3px;
+    align-items: center;
+  }
+  .timeline-side-tag {
+    padding: 1px 6px;
+    border-radius: 8px;
+    font-size: 10px;
+    font-weight: 600;
+  }
+  .timeline-current .timeline-side-tag {
+    background: #e6eef6;
+    color: #1a4a8a;
+  }
+  .timeline-import .timeline-side-tag {
+    background: #e6f0e6;
+    color: #2d5a2d;
+  }
+  .timeline-event-type {
+    font-weight: 600;
+    color: #8a5b41;
+    font-size: 11px;
+  }
+  .timeline-device {
+    padding: 0 4px;
+    font-family: monospace;
+    font-size: 10px;
+    background: #f0e6d6;
+    border-radius: 3px;
+    color: #6b5a4a;
+  }
+  .timeline-time {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    color: #8a7665;
+    font-size: 11px;
+    margin-bottom: 2px;
+  }
+  .timeline-note {
+    color: #5a4a3a;
+    font-size: 12px;
+    padding: 2px 0;
+  }
+  .timeline-fields {
+    margin-top: 2px;
+    font-size: 11px;
+    color: #6b5a4a;
+  }
+
+  .sum-chip.diff-event { background: #f0eef6; color: #6a2d6a; }
+  .diff-item.diff-event { border-left: 4px solid #8a4d8a; }
 </style>

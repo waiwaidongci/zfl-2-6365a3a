@@ -1,4 +1,4 @@
-import { TABLES } from '$lib/database.js';
+import { TABLES, EVENT_TYPES, EVENT_TYPE_LABELS, getDeviceEventTimelines } from '$lib/database.js';
 
 export const DIFF_TYPES = {
   ADDED: 'added',
@@ -6,7 +6,8 @@ export const DIFF_TYPES = {
   FIELD_CONFLICT: 'field_conflict',
   DELETED_SUSPECT: 'deleted_suspect',
   MODIFIED_ONLY_IN_CURRENT: 'modified_only_in_current',
-  MODIFIED_ONLY_IN_IMPORT: 'modified_only_in_import'
+  MODIFIED_ONLY_IN_IMPORT: 'modified_only_in_import',
+  EVENT_BASED_RESOLVABLE: 'event_based_resolvable'
 };
 
 export const DIFF_LABELS = {
@@ -15,7 +16,8 @@ export const DIFF_LABELS = {
   [DIFF_TYPES.FIELD_CONFLICT]: '字段冲突（双方都修改了不同字段）',
   [DIFF_TYPES.DELETED_SUSPECT]: '疑似删除（当前有，导入中没有）',
   [DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT]: '仅当前侧有修改',
-  [DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]: '仅导入侧有修改'
+  [DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]: '仅导入侧有修改',
+  [DIFF_TYPES.EVENT_BASED_RESOLVABLE]: '基于事件时间线可自动判断'
 };
 
 export const DECISION_CHOICES = {
@@ -53,7 +55,8 @@ export const MERGE_TABLES = [
 export const AUTO_MERGE_TABLES = [
   TABLES.records,
   TABLES.inventoryTasks,
-  TABLES.inventoryItems
+  TABLES.inventoryItems,
+  TABLES.syncEvents
 ];
 
 function deepClone(obj) {
@@ -68,7 +71,7 @@ function getFieldDiff(current, imported) {
   const keys = new Set([...Object.keys(current || {}), ...Object.keys(imported || {})]);
   const conflicts = [];
   for (const key of keys) {
-    if (key === 'id') continue;
+    if (key === 'id' || key === 'updatedAt' || key === 'createdAt' || key === 'syncCounter') continue;
     const cv = current?.[key];
     const iv = imported?.[key];
     if (!deepEqual(cv, iv)) {
@@ -90,7 +93,82 @@ function buildIndex(records) {
   return idx;
 }
 
-export function diffTable(currentRecords, importRecords) {
+function analyzeTimelineForRecord(timelineByRecord, table, recordId) {
+  if (!timelineByRecord) return null;
+  const key = `${table}|${recordId}`;
+  const events = timelineByRecord.get(key) || [];
+  if (events.length === 0) return null;
+
+  const currentEvents = events.filter((e) => e.side === 'current');
+  const importEvents = events.filter((e) => e.side === 'import');
+
+  const result = {
+    allEvents: events,
+    currentEvents,
+    importEvents,
+    hasEvents: events.length > 0,
+    lastCurrentEvent: currentEvents.length > 0 ? currentEvents[currentEvents.length - 1] : null,
+    lastImportEvent: importEvents.length > 0 ? importEvents[importEvents.length - 1] : null,
+    conflictSources: [],
+    canAutoResolve: false,
+    autoChoice: null,
+    autoReason: ''
+  };
+
+  if (currentEvents.length > 0 && importEvents.length > 0) {
+    const lastCurTime = new Date(result.lastCurrentEvent.timestamp).getTime();
+    const lastImpTime = new Date(result.lastImportEvent.timestamp).getTime();
+    const curFields = new Set();
+    const impFields = new Set();
+    for (const e of currentEvents) {
+      if (e.changedFields) {
+        for (const f of e.changedFields) curFields.add(f);
+      }
+      if (e.eventType === EVENT_TYPES.DELETE || e.eventType === EVENT_TYPES.CREATE) {
+        curFields.add('__existence__');
+      }
+    }
+    for (const e of importEvents) {
+      if (e.changedFields) {
+        for (const f of e.changedFields) impFields.add(f);
+      }
+      if (e.eventType === EVENT_TYPES.DELETE || e.eventType === EVENT_TYPES.CREATE) {
+        impFields.add('__existence__');
+      }
+    }
+    const overlappingFields = [...curFields].filter((f) => impFields.has(f));
+    if (overlappingFields.length === 0) {
+      result.canAutoResolve = true;
+      result.autoReason = '双方修改不同字段，可双向合并';
+      result.autoChoice = 'merge_both';
+      result.conflictSources = overlappingFields;
+    } else if (lastCurTime > lastImpTime + 1000) {
+      result.canAutoResolve = true;
+      result.autoChoice = DECISION_CHOICES.KEEP_CURRENT;
+      result.autoReason = `当前侧最后更新 (${new Date(lastCurTime).toLocaleString()}) 晚于导入侧 (${new Date(lastImpTime).toLocaleString()})`;
+    } else if (lastImpTime > lastCurTime + 1000) {
+      result.canAutoResolve = true;
+      result.autoChoice = DECISION_CHOICES.USE_IMPORT;
+      result.autoReason = `导入侧最后更新 (${new Date(lastImpTime).toLocaleString()}) 晚于当前侧 (${new Date(lastCurTime).toLocaleString()})`;
+    } else {
+      result.conflictSources = overlappingFields;
+      result.autoReason = '双方在相近时间修改了相同字段，存在真实冲突';
+    }
+  } else if (currentEvents.length > 0) {
+    result.canAutoResolve = true;
+    result.autoChoice = DECISION_CHOICES.KEEP_CURRENT;
+    result.autoReason = '仅当前侧有变更事件记录';
+  } else if (importEvents.length > 0) {
+    result.canAutoResolve = true;
+    result.autoChoice = DECISION_CHOICES.USE_IMPORT;
+    result.autoReason = '仅导入侧有变更事件记录';
+  }
+
+  return result;
+}
+
+export function diffTable(currentRecords, importRecords, options = {}) {
+  const { timelineByRecord, table } = options;
   const currentIdx = buildIndex(currentRecords);
   const importIdx = buildIndex(importRecords);
   const allIds = new Set([...currentIdx.keys(), ...importIdx.keys()]);
@@ -101,26 +179,30 @@ export function diffTable(currentRecords, importRecords) {
     [DIFF_TYPES.FIELD_CONFLICT]: [],
     [DIFF_TYPES.DELETED_SUSPECT]: [],
     [DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT]: [],
-    [DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]: []
+    [DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]: [],
+    [DIFF_TYPES.EVENT_BASED_RESOLVABLE]: []
   };
 
   for (const id of allIds) {
     const cur = currentIdx.get(id);
     const imp = importIdx.get(id);
+    const timelineAnalysis = analyzeTimelineForRecord(timelineByRecord, table, id);
 
     if (cur && !imp) {
       result[DIFF_TYPES.DELETED_SUSPECT].push({
         id,
         current: deepClone(cur),
         imported: null,
-        fieldConflicts: []
+        fieldConflicts: [],
+        timelineAnalysis
       });
     } else if (!cur && imp) {
       result[DIFF_TYPES.ADDED].push({
         id,
         current: null,
         imported: deepClone(imp),
-        fieldConflicts: []
+        fieldConflicts: [],
+        timelineAnalysis
       });
     } else {
       const fieldConflicts = getFieldDiff(cur, imp);
@@ -129,27 +211,47 @@ export function diffTable(currentRecords, importRecords) {
           id,
           current: deepClone(cur),
           imported: deepClone(imp),
-          fieldConflicts: []
+          fieldConflicts: [],
+          timelineAnalysis
         });
       } else {
-        const currentHasMeta = !!(cur.updatedAt || cur.createdAt);
-        const importHasMeta = !!(imp.updatedAt || imp.createdAt);
-        let type = DIFF_TYPES.FIELD_CONFLICT;
-        if (currentHasMeta && importHasMeta) {
-          const curTime = new Date(cur.updatedAt || cur.createdAt).getTime();
-          const impTime = new Date(imp.updatedAt || imp.createdAt).getTime();
-          if (curTime > impTime) {
+        if (timelineAnalysis && timelineAnalysis.hasEvents && timelineAnalysis.canAutoResolve) {
+          let type = DIFF_TYPES.EVENT_BASED_RESOLVABLE;
+          if (timelineAnalysis.autoChoice === DECISION_CHOICES.KEEP_CURRENT) {
             type = DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT;
-          } else if (impTime > curTime) {
+          } else if (timelineAnalysis.autoChoice === DECISION_CHOICES.USE_IMPORT) {
             type = DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT;
+          } else if (timelineAnalysis.autoChoice === 'merge_both') {
+            type = DIFF_TYPES.EVENT_BASED_RESOLVABLE;
           }
+          result[type].push({
+            id,
+            current: deepClone(cur),
+            imported: deepClone(imp),
+            fieldConflicts,
+            timelineAnalysis
+          });
+        } else {
+          const currentHasMeta = !!(cur.updatedAt || cur.createdAt);
+          const importHasMeta = !!(imp.updatedAt || imp.createdAt);
+          let type = DIFF_TYPES.FIELD_CONFLICT;
+          if (currentHasMeta && importHasMeta && !timelineAnalysis?.hasEvents) {
+            const curTime = new Date(cur.updatedAt || cur.createdAt).getTime();
+            const impTime = new Date(imp.updatedAt || imp.createdAt).getTime();
+            if (curTime > impTime) {
+              type = DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT;
+            } else if (impTime > curTime) {
+              type = DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT;
+            }
+          }
+          result[type].push({
+            id,
+            current: deepClone(cur),
+            imported: deepClone(imp),
+            fieldConflicts,
+            timelineAnalysis
+          });
         }
-        result[type].push({
-          id,
-          current: deepClone(cur),
-          imported: deepClone(imp),
-          fieldConflicts
-        });
       }
     }
   }
@@ -266,11 +368,15 @@ export function detectCrossReferenceRisks(currentDB, importDB, diffResult) {
 }
 
 export function computeFullDiff(currentDB, importDB) {
+  const timeline = getDeviceEventTimelines(currentDB, importDB);
   const diff = {};
   const summary = {};
 
   for (const table of MERGE_TABLES) {
-    const tableDiff = diffTable(currentDB.tables[table] || [], importDB.tables[table] || []);
+    const tableDiff = diffTable(currentDB.tables[table] || [], importDB.tables[table] || [], {
+      timelineByRecord: timeline.byRecord,
+      table
+    });
     diff[table] = tableDiff;
     summary[table] = {
       [DIFF_TYPES.ADDED]: tableDiff[DIFF_TYPES.ADDED].length,
@@ -278,18 +384,27 @@ export function computeFullDiff(currentDB, importDB) {
       [DIFF_TYPES.FIELD_CONFLICT]: tableDiff[DIFF_TYPES.FIELD_CONFLICT].length,
       [DIFF_TYPES.DELETED_SUSPECT]: tableDiff[DIFF_TYPES.DELETED_SUSPECT].length,
       [DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT]: tableDiff[DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT].length,
-      [DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]: tableDiff[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT].length
+      [DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]: tableDiff[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT].length,
+      [DIFF_TYPES.EVENT_BASED_RESOLVABLE]: tableDiff[DIFF_TYPES.EVENT_BASED_RESOLVABLE].length
     };
   }
 
   const autoMerge = {};
   const autoMergeSummary = {};
   for (const table of AUTO_MERGE_TABLES) {
-    const curIds = new Set((currentDB.tables[table] || []).map((r) => r.id));
-    const impRecs = importDB.tables[table] || [];
-    const toAdd = impRecs.filter((r) => r && r.id && !curIds.has(r.id));
-    autoMerge[table] = toAdd;
-    autoMergeSummary[table] = toAdd.length;
+    if (table === TABLES.syncEvents) {
+      const curEventIds = new Set((currentDB.tables[table] || []).map((r) => r.id));
+      const impRecs = importDB.tables[table] || [];
+      const toAdd = impRecs.filter((r) => r && r.id && !curEventIds.has(r.id));
+      autoMerge[table] = toAdd;
+      autoMergeSummary[table] = toAdd.length;
+    } else {
+      const curIds = new Set((currentDB.tables[table] || []).map((r) => r.id));
+      const impRecs = importDB.tables[table] || [];
+      const toAdd = impRecs.filter((r) => r && r.id && !curIds.has(r.id));
+      autoMerge[table] = toAdd;
+      autoMergeSummary[table] = toAdd.length;
+    }
   }
 
   const risks = detectCrossReferenceRisks(currentDB, importDB, diff);
@@ -299,8 +414,33 @@ export function computeFullDiff(currentDB, importDB) {
     summary,
     autoMerge,
     autoMergeSummary,
-    risks
+    risks,
+    timeline: timeline.allEvents,
+    timelineByRecord: timeline.byRecord,
+    importMeta: importDB._meta || null,
+    currentMeta: currentDB._meta || null
   };
+}
+
+function mergeBothSides(current, imported, fieldConflicts, timelineAnalysis) {
+  const result = deepClone(current || {});
+  if (!timelineAnalysis || timelineAnalysis.autoChoice !== 'merge_both') {
+    return result;
+  }
+  const curFields = new Set();
+  const impFields = new Set();
+  for (const e of timelineAnalysis.currentEvents || []) {
+    if (e.changedFields) for (const f of e.changedFields) curFields.add(f);
+  }
+  for (const e of timelineAnalysis.importEvents || []) {
+    if (e.changedFields) for (const f of e.changedFields) impFields.add(f);
+  }
+  for (const fc of fieldConflicts || []) {
+    if (impFields.has(fc.field) && !curFields.has(fc.field)) {
+      result[fc.field] = fc.imported;
+    }
+  }
+  return result;
 }
 
 export function createDefaultDecisions(diffResult) {
@@ -322,16 +462,42 @@ export function createDefaultDecisions(diffResult) {
         mergedData: deepClone(item.current)
       };
     }
+    for (const item of td[DIFF_TYPES.EVENT_BASED_RESOLVABLE]) {
+      let choice = DECISION_CHOICES.KEEP_CURRENT;
+      let merged = deepClone(item.current);
+      if (item.timelineAnalysis?.autoChoice === 'merge_both') {
+        choice = DECISION_CHOICES.MANUAL;
+        merged = mergeBothSides(item.current, item.imported, item.fieldConflicts, item.timelineAnalysis);
+        decisions[table][item.id] = {
+          choice: null,
+          mergedData: merged,
+          suggestedChoice: DECISION_CHOICES.MANUAL,
+          autoMergedData: deepClone(merged),
+          autoReason: item.timelineAnalysis.autoReason
+        };
+        continue;
+      } else if (item.timelineAnalysis?.autoChoice === DECISION_CHOICES.USE_IMPORT) {
+        choice = DECISION_CHOICES.USE_IMPORT;
+        merged = deepClone(item.imported);
+      }
+      decisions[table][item.id] = {
+        choice,
+        mergedData: merged,
+        autoReason: item.timelineAnalysis?.autoReason || ''
+      };
+    }
     for (const item of td[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]) {
       decisions[table][item.id] = {
         choice: DECISION_CHOICES.USE_IMPORT,
-        mergedData: deepClone(item.imported)
+        mergedData: deepClone(item.imported),
+        autoReason: item.timelineAnalysis?.autoReason || ''
       };
     }
     for (const item of td[DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT]) {
       decisions[table][item.id] = {
         choice: DECISION_CHOICES.KEEP_CURRENT,
-        mergedData: deepClone(item.current)
+        mergedData: deepClone(item.current),
+        autoReason: item.timelineAnalysis?.autoReason || ''
       };
     }
     for (const item of td[DIFF_TYPES.FIELD_CONFLICT]) {
@@ -341,9 +507,14 @@ export function createDefaultDecisions(diffResult) {
       };
     }
     for (const item of td[DIFF_TYPES.DELETED_SUSPECT]) {
+      let choice = DECISION_CHOICES.KEEP_CURRENT;
+      if (item.timelineAnalysis?.autoChoice === DECISION_CHOICES.USE_IMPORT) {
+        choice = DECISION_CHOICES.USE_IMPORT;
+      }
       decisions[table][item.id] = {
-        choice: DECISION_CHOICES.KEEP_CURRENT,
-        mergedData: deepClone(item.current)
+        choice,
+        mergedData: deepClone(item.current),
+        autoReason: item.timelineAnalysis?.autoReason || ''
       };
     }
   }
@@ -370,7 +541,8 @@ export function collectPendingConflicts(diffResult, decisions) {
     const td = diffResult.tables[table];
     const allConflicts = [
       ...td[DIFF_TYPES.FIELD_CONFLICT],
-      ...td[DIFF_TYPES.DELETED_SUSPECT]
+      ...td[DIFF_TYPES.DELETED_SUSPECT],
+      ...td[DIFF_TYPES.EVENT_BASED_RESOLVABLE]
     ];
     for (const item of allConflicts) {
       const dec = decisions[table]?.[item.id];
@@ -529,6 +701,7 @@ export function applyMerge(currentDB, importDB, diffResult, decisions) {
       ...td[DIFF_TYPES.ADDED],
       ...td[DIFF_TYPES.IDENTICAL],
       ...td[DIFF_TYPES.FIELD_CONFLICT],
+      ...td[DIFF_TYPES.EVENT_BASED_RESOLVABLE],
       ...td[DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT],
       ...td[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT],
       ...td[DIFF_TYPES.DELETED_SUSPECT]
