@@ -730,7 +730,7 @@
   $: allSelected = discrepancyItems.length > 0 && discrepancyItems.every((i) => selectedItemIds.has(i.id));
   $: someVisibleSelected = filteredDiscrepancyItems.some((i) => selectedItemIds.has(i.id));
   $: someSelected = selectedItemIds.size > 0;
-  $: selectedItemsForBatch = getSelectedItems();
+  $: selectedItemsForBatch = discrepancyItems.filter((item) => selectedItemIds.has(item.id));
   $: selectedMissingCount = selectedItemsForBatch.filter((i) => i.actualStatus === INVENTORY_STATUS.MISSING).length;
   $: selectedLocationCount = selectedItemsForBatch.filter((i) => i.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH).length;
   $: selectedStatusCount = selectedItemsForBatch.filter((i) => i.actualStatus === INVENTORY_STATUS.STATUS_MISMATCH).length;
