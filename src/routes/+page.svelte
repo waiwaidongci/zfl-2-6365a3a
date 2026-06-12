@@ -23,7 +23,13 @@
     TABLE_LABELS
   } from '$lib/database.js';
   import ScheduleKanban from '$lib/ScheduleKanban.svelte';
-  import { getAllSchedules } from '$lib/scheduleStore.js';
+  import RiskCenter from '$lib/RiskCenter.svelte';
+  import {
+    getAllSchedules,
+    getAllRiskStatuses,
+    compute30DayRisks,
+    getRiskStats
+  } from '$lib/scheduleStore.js';
   import InventoryPanel from '$lib/InventoryPanel.svelte';
   import InventoryDetail from '$lib/InventoryDetail.svelte';
   import MergePanel from '$lib/MergePanel.svelte';
@@ -152,6 +158,8 @@
   let dbStats = null;
   let showDataManager = false;
   let showScheduleKanban = false;
+  let showRiskCenter = false;
+  let riskStatuses = [];
   let restorePreview = null;
   let restoreFileContent = '';
   let restoreError = '';
@@ -176,6 +184,7 @@
     packingLists = db.tables[TABLES.packingLists] || [];
     schedules = db.tables[TABLES.schedules] || [];
     inventoryTasks = db.tables[TABLES.inventoryTasks] || [];
+    riskStatuses = db.tables[TABLES.riskStatuses] || [];
     dbStats = getDBStats();
     if (hadLegacy && db.migratedAt) {
       dbMigrationNotice = '检测到旧版数据已自动迁移到新版数据层，可在数据管理中查看详情。';
@@ -184,6 +193,12 @@
     document.addEventListener('select-task', handleSelectInventoryTask);
     document.addEventListener('inventory-updated', handleInventoryUpdated);
   });
+
+  function handleRiskCenterChange() {
+    const db = initializeDatabase();
+    riskStatuses = db.tables[TABLES.riskStatuses] || [];
+    refreshDBStats();
+  }
 
   function handleSelectInventoryTask(e) {
     selectedInventoryTaskId = e.detail;
@@ -200,9 +215,13 @@
     packingLists = db.tables[TABLES.packingLists] || [];
     schedules = db.tables[TABLES.schedules] || [];
     inventoryTasks = db.tables[TABLES.inventoryTasks] || [];
+    riskStatuses = db.tables[TABLES.riskStatuses] || [];
     refreshDBStats();
     inventoryPanelRef?.refresh?.();
   }
+
+  $: allRisks = compute30DayRisks(costumes, reservations, workOrders, packingLists);
+  $: riskStats = getRiskStats(allRisks);
 
   function closeInventoryDetail() {
     showInventoryDetail = false;
@@ -1442,6 +1461,8 @@
         closePackingListDetail();
       } else if (showInventoryDetail) {
         closeInventoryDetail();
+      } else if (showRiskCenter) {
+        showRiskCenter = false;
       } else if (selectedId) {
         closeDetail();
       }
@@ -1469,6 +1490,9 @@
       </button>
       <button type="button" class="hero-data-btn" on:click={() => showScheduleKanban = !showScheduleKanban}>
         <LayoutGrid size={16} />排期看板
+      </button>
+      <button type="button" class="hero-data-btn hero-risk-btn" class:has-risk={riskStats.pending > 0 || riskStats.high > 0} on:click={() => showRiskCenter = !showRiskCenter}>
+        <AlertTriangle size={16} />风险中心{#if riskStats.pending > 0}<span class="hero-risk-badge">{riskStats.pending}</span>{/if}
       </button>
     </div>
   </header>
@@ -1529,6 +1553,18 @@
         {packingLists}
         on:change={handleScheduleChange}
         on:generate-packing-list={handleGeneratePackingListFromSchedule}
+      />
+    </section>
+  {/if}
+
+  {#if showRiskCenter}
+    <section class="panel">
+      <RiskCenter
+        {costumes}
+        {reservations}
+        {workOrders}
+        {packingLists}
+        on:change={handleRiskCenterChange}
       />
     </section>
   {/if}
@@ -2989,7 +3025,25 @@
                   <div class="db-stat-num">{dbStats.tables.inventoryItems || 0}</div>
                   <div class="db-stat-label">盘点明细</div>
                 </div>
+                <div class="db-stat-card">
+                  <div class="db-stat-num">{dbStats.tables.riskStatuses || 0}</div>
+                  <div class="db-stat-label">风险状态</div>
+                </div>
               </div>
+
+              {#if dbStats.riskStatuses && dbStats.riskStatuses.total > 0}
+                <div class="risk-stats-section">
+                  <h4><AlertTriangle size={14} />风险处理状态分布</h4>
+                  <div class="risk-stats-grid">
+                    {#each Object.entries(dbStats.riskStatuses.byStatus) as [status, count]}
+                      <div class="risk-stat-mini">
+                        <span class="risk-stat-mini-num">{count}</span>
+                        <span class="risk-stat-mini-label">{status}</span>
+                      </div>
+                    {/each}
+                  </div>
+                </div>
+              {/if}
             </div>
           {/if}
 
@@ -3501,6 +3555,33 @@
     padding: 10px 12px !important;
   }
   .hero-data-btn:hover { background: rgb(255 255 255 / .28) !important; }
+  .hero-risk-btn { position: relative; }
+  .hero-risk-btn.has-risk {
+    background: #b84a3b !important;
+    border-color: #b84a3b !important;
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgb(184 74 59 / .5); }
+    50% { box-shadow: 0 0 0 8px rgb(184 74 59 / 0); }
+  }
+  .hero-risk-badge {
+    position: absolute;
+    top: -4px;
+    right: -4px;
+    background: #fff;
+    color: #b84a3b;
+    font-size: 10px;
+    font-weight: 600;
+    min-width: 18px;
+    height: 18px;
+    border-radius: 9px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    padding: 0 4px;
+    line-height: 1;
+  }
 
   .migration-notice {
     display: flex;
@@ -3587,6 +3668,44 @@
     border: 1px solid #e4d8cc;
     border-radius: 8px;
     text-align: center;
+  }
+  .risk-stats-section {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid #eadfd4;
+  }
+  .risk-stats-section h4 {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    color: #603d2d;
+    margin: 0 0 10px;
+    font-weight: 600;
+  }
+  .risk-stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+    gap: 8px;
+  }
+  .risk-stat-mini {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    padding: 8px;
+    background: #faf6f2;
+    border-radius: 6px;
+    border: 1px solid #e4d8cc;
+  }
+  .risk-stat-mini-num {
+    font-size: 18px;
+    font-weight: 600;
+    color: #603d2d;
+  }
+  .risk-stat-mini-label {
+    font-size: 11px;
+    color: #8a7665;
+    margin-top: 2px;
   }
   .db-stat-num {
     font-size: 24px;

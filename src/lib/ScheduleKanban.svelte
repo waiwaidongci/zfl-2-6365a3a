@@ -13,7 +13,12 @@
     autoLinkCostumes,
     getUpcomingSchedules,
     getUniquePlays,
-    generatePackingListFromSchedule
+    generatePackingListFromSchedule,
+    RISK_STATUS,
+    RISK_TYPE_LABELS,
+    updateRiskProcessingStatus,
+    compute30DayRisks,
+    getRiskStats
   } from '$lib/scheduleStore.js';
 
   export let schedules = [];
@@ -40,6 +45,7 @@
   let expandedDate = '';
   let showRiskDetail = false;
   let riskDate = '';
+  let showRiskStatusMenu = null;
 
   let scheduleForm = {
     play: '',
@@ -50,6 +56,30 @@
     note: '',
     linkedCostumeIds: []
   };
+
+  $: allRisks = compute30DayRisks(costumes, reservations, workOrders, packingLists);
+  $: riskStats = getRiskStats(allRisks);
+
+  function getRiskStatusBadgeClass(status) {
+    if (status === RISK_STATUS.PENDING) return 'sk-risk-status-pending';
+    if (status === RISK_STATUS.CONFIRMED) return 'sk-risk-status-confirmed';
+    if (status === RISK_STATUS.DEFERRED) return 'sk-risk-status-deferred';
+    if (status === RISK_STATUS.RESOLVED) return 'sk-risk-status-resolved';
+    return '';
+  }
+
+  function handleRiskStatusChange(riskKey, newStatus) {
+    updateRiskProcessingStatus(riskKey, newStatus);
+    dispatch('change');
+    showRiskStatusMenu = null;
+  }
+
+  function formatDate(dateStr) {
+    if (!dateStr) return '';
+    const d = new Date(dateStr + 'T00:00:00');
+    const weekdays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    return `${dateStr} ${weekdays[d.getDay()]}`;
+  }
 
   $: plays = ['全部剧目', ...new Set([
     ...schedules.map((s) => s.play).filter(Boolean),
@@ -254,6 +284,56 @@
     </div>
   </div>
 
+  <div class="sk-risk-summary">
+    <div class="sk-risk-summary-title">
+      <AlertTriangle size={16} />未来 30 天风险摘要
+    </div>
+    <div class="sk-risk-summary-grid">
+      <div class="sk-risk-stat sk-risk-stat-high">
+        <AlertOctagon size={18} />
+        <div>
+          <div class="sk-risk-stat-num">{riskStats.high}</div>
+          <div class="sk-risk-stat-label">高风险</div>
+        </div>
+      </div>
+      <div class="sk-risk-stat sk-risk-stat-medium">
+        <AlertTriangle size={18} />
+        <div>
+          <div class="sk-risk-stat-num">{riskStats.medium}</div>
+          <div class="sk-risk-stat-label">中风险</div>
+        </div>
+      </div>
+      <div class="sk-risk-stat sk-risk-stat-low">
+        <Clock size={18} />
+        <div>
+          <div class="sk-risk-stat-num">{riskStats.low}</div>
+          <div class="sk-risk-stat-label">低风险</div>
+        </div>
+      </div>
+      <div class="sk-risk-stat sk-risk-stat-pending">
+        <Clock size={18} />
+        <div>
+          <div class="sk-risk-stat-num">{riskStats.pending}</div>
+          <div class="sk-risk-stat-label">待处理</div>
+        </div>
+      </div>
+      <div class="sk-risk-stat sk-risk-stat-confirmed">
+        <CheckCircle size={18} />
+        <div>
+          <div class="sk-risk-stat-num">{riskStats.confirmed}</div>
+          <div class="sk-risk-stat-label">已确认</div>
+        </div>
+      </div>
+      <div class="sk-risk-stat sk-risk-stat-resolved">
+        <CheckCircle2 size={18} />
+        <div>
+          <div class="sk-risk-stat-num">{riskStats.resolved}</div>
+          <div class="sk-risk-stat-label">已解决</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
   <div class="sk-toolbar">
     <label class="sk-search-label">
       <Search size={16} />
@@ -345,12 +425,17 @@
 
                   {#if scheduleRisk && scheduleRisk.risks.length > 0}
                     <div class="sk-risk-list">
-                      {#each scheduleRisk.risks.slice(0, 3) as risk}
-                        <div class="sk-risk-item sk-risk-item-{risk.level}">
-                          {#if risk.level === 'high'}<AlertOctagon size={12} />
-                          {:else if risk.level === 'medium'}<AlertTriangle size={12} />
-                          {:else}<Clock size={12} />{/if}
-                          <span>{risk.message}</span>
+                      {#each scheduleRisk.risks.slice(0, 3) as risk (risk.riskKey)}
+                        <div class="sk-risk-item sk-risk-item-{risk.level}" class:sk-risk-item-resolved={risk.processingStatus === RISK_STATUS.RESOLVED}>
+                          <div class="sk-risk-item-main">
+                            {#if risk.level === 'high'}<AlertOctagon size={12} />
+                            {:else if risk.level === 'medium'}<AlertTriangle size={12} />
+                            {:else}<Clock size={12} />{/if}
+                            <span>{risk.message}</span>
+                          </div>
+                          <span class="sk-risk-status-badge {getRiskStatusBadgeClass(risk.processingStatus)}">
+                            {risk.processingStatus}
+                          </span>
                         </div>
                       {/each}
                       {#if scheduleRisk.risks.length > 3}
@@ -533,12 +618,38 @@
           <div class="sk-detail-section">
             <h3><AlertTriangle size={14} />风险提示 ({detailScheduleRisk.risks.length})</h3>
             <div class="sk-detail-risks">
-              {#each detailScheduleRisk.risks as risk}
-                <div class="sk-risk-item sk-risk-item-{risk.level}">
-                  {#if risk.level === 'high'}<AlertOctagon size={13} />
-                  {:else if risk.level === 'medium'}<AlertTriangle size={13} />
-                  {:else}<Clock size={13} />{/if}
-                  <span>{risk.message}</span>
+              {#each detailScheduleRisk.risks as risk (risk.riskKey)}
+                <div class="sk-risk-item sk-risk-item-{risk.level}" class:sk-risk-item-resolved={risk.processingStatus === RISK_STATUS.RESOLVED}>
+                  <div class="sk-risk-item-main">
+                    {#if risk.level === 'high'}<AlertOctagon size={13} />
+                    {:else if risk.level === 'medium'}<AlertTriangle size={13} />
+                    {:else}<Clock size={13} />{/if}
+                    <span>{risk.message}</span>
+                  </div>
+                  <div class="sk-risk-status-menu" on:click|stopPropagation>
+                    <button
+                      type="button"
+                      class="sk-risk-status-btn {getRiskStatusBadgeClass(risk.processingStatus)}"
+                      on:click={() => showRiskStatusMenu = showRiskStatusMenu === risk.riskKey ? null : risk.riskKey}
+                    >
+                      {risk.processingStatus}
+                      <ChevronDown size={10} />
+                    </button>
+                    {#if showRiskStatusMenu === risk.riskKey}
+                      <div class="sk-risk-status-dropdown">
+                        {#each [RISK_STATUS.PENDING, RISK_STATUS.CONFIRMED, RISK_STATUS.DEFERRED, RISK_STATUS.RESOLVED] as s}
+                          <button
+                            type="button"
+                            class="sk-risk-dropdown-item"
+                            class:sk-risk-dropdown-active={risk.processingStatus === s}
+                            on:click={() => handleRiskStatusChange(risk.riskKey, s)}
+                          >
+                            {s}
+                          </button>
+                        {/each}
+                      </div>
+                    {/if}
+                  </div>
                 </div>
               {/each}
             </div>
@@ -584,14 +695,35 @@
                 <span>{item.schedule.time || ''} {item.schedule.venue || ''}</span>
                 <span class="sk-status-badge {getStatusClass(item.schedule.status)}">{item.schedule.status}</span>
               </div>
+              {#if item.resolvedCount > 0 || item.deferredCount > 0 || item.confirmedCount > 0}
+                <div class="sk-risk-status-summary">
+                  {#if item.pendingCount > 0}
+                    <span class="sk-risk-status-tag sk-risk-status-pending">{RISK_STATUS.PENDING}: {item.pendingCount || 0}</span>
+                  {/if}
+                  {#if item.confirmedCount > 0}
+                    <span class="sk-risk-status-tag sk-risk-status-confirmed">{RISK_STATUS.CONFIRMED}: {item.confirmedCount}</span>
+                  {/if}
+                  {#if item.deferredCount > 0}
+                    <span class="sk-risk-status-tag sk-risk-status-deferred">{RISK_STATUS.DEFERRED}: {item.deferredCount}</span>
+                  {/if}
+                  {#if item.resolvedCount > 0}
+                    <span class="sk-risk-status-tag sk-risk-status-resolved">{RISK_STATUS.RESOLVED}: {item.resolvedCount}</span>
+                  {/if}
+                </div>
+              {/if}
               {#if item.risks.length > 0}
                 <div class="sk-detail-risks">
-                  {#each item.risks as risk}
-                    <div class="sk-risk-item sk-risk-item-{risk.level}">
-                      {#if risk.level === 'high'}<AlertOctagon size={13} />
-                      {:else if risk.level === 'medium'}<AlertTriangle size={13} />
-                      {:else}<Clock size={13} />{/if}
-                      <span>{risk.message}</span>
+                  {#each item.risks as risk (risk.riskKey)}
+                    <div class="sk-risk-item sk-risk-item-{risk.level}" class:sk-risk-item-resolved={risk.processingStatus === RISK_STATUS.RESOLVED}>
+                      <div class="sk-risk-item-main">
+                        {#if risk.level === 'high'}<AlertOctagon size={13} />
+                        {:else if risk.level === 'medium'}<AlertTriangle size={13} />
+                        {:else}<Clock size={13} />{/if}
+                        <span>{risk.message}</span>
+                      </div>
+                      <span class="sk-risk-status-badge {getRiskStatusBadgeClass(risk.processingStatus)}">
+                        {risk.processingStatus}
+                      </span>
                     </div>
                   {/each}
                 </div>
@@ -620,6 +752,132 @@
     display: flex;
     justify-content: space-between;
     align-items: center;
+  }
+
+  .sk-risk-summary {
+    background: #fffaf5;
+    border: 1px solid #eadfd4;
+    border-radius: 10px;
+    padding: 14px;
+  }
+  .sk-risk-summary-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 14px;
+    font-weight: 600;
+    color: #603d2d;
+    margin-bottom: 10px;
+  }
+  .sk-risk-summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+    gap: 8px;
+  }
+  .sk-risk-stat {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 12px;
+    background: #fff;
+    border-radius: 8px;
+    border: 1px solid #eadfd4;
+  }
+  .sk-risk-stat-high { color: #b84a3b; border-left: 3px solid #b84a3b; }
+  .sk-risk-stat-medium { color: #c9a040; border-left: 3px solid #c9a040; }
+  .sk-risk-stat-low { color: #8a9a8a; border-left: 3px solid #8a9a8a; }
+  .sk-risk-stat-pending { color: #c9a040; border-left: 3px solid #c9a040; }
+  .sk-risk-stat-confirmed { color: #4a6b8a; border-left: 3px solid #4a6b8a; }
+  .sk-risk-stat-resolved { color: #4a8a4a; border-left: 3px solid #4a8a4a; }
+  .sk-risk-stat-num {
+    font-size: 20px;
+    font-weight: 600;
+    line-height: 1;
+  }
+  .sk-risk-stat-label {
+    font-size: 11px;
+    color: #8a7665;
+    margin-top: 2px;
+  }
+
+  .sk-risk-item-main {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    flex: 1;
+    min-width: 0;
+  }
+  .sk-risk-item-resolved {
+    opacity: 0.5;
+  }
+  .sk-risk-status-badge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    font-weight: 500;
+    flex-shrink: 0;
+  }
+  .sk-risk-status-pending { background: #fff4e6; color: #8a5a1a; }
+  .sk-risk-status-confirmed { background: #e6eef6; color: #1a4a8a; }
+  .sk-risk-status-deferred { background: #f0e6dc; color: #6b5a4d; }
+  .sk-risk-status-resolved { background: #e6f0e6; color: #2d5a2d; }
+
+  .sk-risk-status-menu {
+    position: relative;
+  }
+  .sk-risk-status-btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 11px;
+    padding: 3px 8px;
+    border-radius: 4px;
+    font-weight: 500;
+    border: 1px solid transparent;
+    cursor: pointer;
+    font: inherit;
+    background: transparent;
+  }
+  .sk-risk-status-btn:hover { filter: brightness(0.95); }
+  .sk-risk-status-dropdown {
+    position: absolute;
+    top: calc(100% + 4px);
+    right: 0;
+    background: #fff;
+    border: 1px solid #d8c8ba;
+    border-radius: 6px;
+    box-shadow: 0 4px 12px rgb(38 33 28 / .15);
+    z-index: 10;
+    min-width: 100px;
+    overflow: hidden;
+  }
+  .sk-risk-dropdown-item {
+    display: block;
+    width: 100%;
+    padding: 8px 12px;
+    border: 0;
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 12px;
+    color: #3b2f26;
+    text-align: left;
+    transition: background .15s;
+  }
+  .sk-risk-dropdown-item:hover { background: #f0e6dc; }
+  .sk-risk-dropdown-active { background: #faf6f2; font-weight: 500; }
+
+  .sk-risk-status-summary {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .sk-risk-status-tag {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-weight: 500;
   }
   .sk-header h2 {
     display: flex;

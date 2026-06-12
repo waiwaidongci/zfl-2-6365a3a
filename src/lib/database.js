@@ -1,5 +1,5 @@
 const DB_KEY = 'zfl-2-database';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 
 const TABLES = {
   costumes: 'costumes',
@@ -10,7 +10,8 @@ const TABLES = {
   packingLists: 'packingLists',
   schedules: 'schedules',
   inventoryTasks: 'inventoryTasks',
-  inventoryItems: 'inventoryItems'
+  inventoryItems: 'inventoryItems',
+  riskStatuses: 'riskStatuses'
 };
 
 const TABLE_LABELS = {
@@ -22,7 +23,8 @@ const TABLE_LABELS = {
   packingLists: '演出装箱单',
   schedules: '演出排期',
   inventoryTasks: '盘点任务',
-  inventoryItems: '盘点明细'
+  inventoryItems: '盘点明细',
+  riskStatuses: '风险处理状态'
 };
 
 const LEGACY_KEYS = {
@@ -57,7 +59,8 @@ function createEmptyDatabase() {
       [TABLES.packingLists]: [],
       [TABLES.schedules]: [],
       [TABLES.inventoryTasks]: [],
-      [TABLES.inventoryItems]: []
+      [TABLES.inventoryItems]: [],
+      [TABLES.riskStatuses]: []
     }
   };
 }
@@ -162,11 +165,19 @@ function migrate_v4_to_v5(db) {
   return db;
 }
 
+function migrate_v5_to_v6(db) {
+  if (!db.tables[TABLES.riskStatuses]) {
+    db.tables[TABLES.riskStatuses] = [];
+  }
+  return db;
+}
+
 const MIGRATIONS = {
   1: migrate_v1_to_v2,
   2: migrate_v2_to_v3,
   3: migrate_v3_to_v4,
-  4: migrate_v4_to_v5
+  4: migrate_v4_to_v5,
+  5: migrate_v5_to_v6
 };
 
 function runMigrations(db) {
@@ -376,11 +387,23 @@ export function getDBStats() {
   for (const table of Object.values(TABLES)) {
     stats[table] = (db.tables[table] || []).length;
   }
+
+  const riskStatuses = db.tables[TABLES.riskStatuses] || [];
+  const riskStatusBreakdown = {};
+  for (const rs of riskStatuses) {
+    const status = rs.status || '待处理';
+    riskStatusBreakdown[status] = (riskStatusBreakdown[status] || 0) + 1;
+  }
+
   return {
     version: db.version,
     migratedAt: db.migratedAt,
     meta: db._meta || null,
-    tables: stats
+    tables: stats,
+    riskStatuses: {
+      total: riskStatuses.length,
+      byStatus: riskStatusBreakdown
+    }
   };
 }
 
