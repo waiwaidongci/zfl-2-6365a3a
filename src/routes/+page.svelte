@@ -3965,6 +3965,8 @@
           bind:decisions={mergeDecisions}
           importFileName={mergeFileName}
           importMeta={mergeImportDB?._meta}
+          currentDB={currentDB}
+          importDB={mergeImportDB}
           onClose={closeMergePanel}
           onConfirmMerge={handleConfirmMerge}
         />
