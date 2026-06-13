@@ -39,6 +39,7 @@
     insertOne,
     TABLES
   } from '$lib/database.js';
+  import { globalIndex } from '$lib/dataIndex.js';
 
   export let taskId = null;
   export let onClose = null;
@@ -252,8 +253,7 @@
     const item = items.find((i) => i.id === itemId);
     if (!item) return;
 
-    const costumes = getAll(TABLES.costumes);
-    const costume = costumes.find((c) => c.id === item.costumeId);
+    const costume = globalIndex.getCostumeById(item.costumeId);
     if (!costume) {
       alert('服装档案不存在');
       return;
@@ -276,8 +276,7 @@
     const item = items.find((i) => i.id === itemId);
     if (!item) return;
 
-    const costumes = getAll(TABLES.costumes);
-    const costume = costumes.find((c) => c.id === item.costumeId);
+    const costume = globalIndex.getCostumeById(item.costumeId);
     if (!costume) {
       alert('服装档案不存在');
       return;
@@ -312,8 +311,7 @@
     const item = items.find((i) => i.id === itemId);
     if (!item) return;
 
-    const costumes = getAll(TABLES.costumes);
-    const costume = costumes.find((c) => c.id === item.costumeId);
+    const costume = globalIndex.getCostumeById(item.costumeId);
     if (!costume) return;
 
     if (!confirm('确定要将此服装标记为缺失并写入借还记录吗？')) return;
@@ -364,25 +362,15 @@
   }
 
   function hasActiveWorkOrder(costumeId, type = null) {
-    const workOrders = getAll(TABLES.workOrders);
-    return workOrders.some((wo) => {
-      if (wo.costumeId !== costumeId) return false;
-      const isActive = wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中';
-      if (!isActive) return false;
-      if (type === null) return true;
-      return wo.type === type;
-    });
+    if (type === null) return globalIndex.hasActiveWorkOrder(costumeId);
+    const activeWOs = globalIndex.getActiveWorkOrdersByCostumeId(costumeId);
+    return activeWOs.some((wo) => wo.type === type);
   }
 
   function getActiveWorkOrder(costumeId, type = null) {
-    const workOrders = getAll(TABLES.workOrders);
-    return workOrders.find((wo) => {
-      if (wo.costumeId !== costumeId) return false;
-      const isActive = wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中';
-      if (!isActive) return false;
-      if (type === null) return true;
-      return wo.type === type;
-    });
+    if (type === null) return globalIndex.getActiveWorkOrder(costumeId);
+    const activeWOs = globalIndex.getActiveWorkOrdersByCostumeId(costumeId);
+    return activeWOs.find((wo) => wo.type === type);
   }
 
   function openBatchAction(actionType) {
@@ -456,7 +444,7 @@
     const dueDateOffset = type === '清洗' ? 2 : 5;
 
     items.forEach((item) => {
-      const costume = costumes.find((c) => c.id === item.costumeId);
+      const costume = globalIndex.getCostumeById(item.costumeId);
       if (!costume) {
         skippedCount++;
         skippedItems.push({ name: item.costumeName, reason: '服装档案不存在' });
@@ -506,22 +494,21 @@
       };
       newRecords.push(record);
 
-      const costumeIdx = updatedCostumes.findIndex((c) => c.id === costume.id);
-      if (costumeIdx !== -1) {
-        const newCleanStatus = type === '清洗' ? '待清洗' : '维修中';
-        if (updatedCostumes[costumeIdx].clean !== newCleanStatus) {
-          updatedCostumes[costumeIdx] = { ...updatedCostumes[costumeIdx], clean: newCleanStatus };
-          const cleanRecord = {
-            id: crypto.randomUUID(),
-            timestamp: new Date().toISOString(),
-            type: '清洗',
-            costumeName: costume.name,
-            play: costume.play,
-            operator: '盘点批量',
-            summary: `「${costume.name}」${type === '清洗' ? '清洗状态' : '状态'}变更为「${newCleanStatus}」`
-          };
-          newRecords.push(cleanRecord);
-        }
+      const newCleanStatus = type === '清洗' ? '待清洗' : '维修中';
+      const costumeById = updatedCostumes.find((c) => c.id === costume.id);
+      if (costumeById && costumeById.clean !== newCleanStatus) {
+        const idx = updatedCostumes.indexOf(costumeById);
+        updatedCostumes[idx] = { ...costumeById, clean: newCleanStatus };
+        const cleanRecord = {
+          id: crypto.randomUUID(),
+          timestamp: new Date().toISOString(),
+          type: '清洗',
+          costumeName: costume.name,
+          play: costume.play,
+          operator: '盘点批量',
+          summary: `「${costume.name}」${type === '清洗' ? '清洗状态' : '状态'}变更为「${newCleanStatus}」`
+        };
+        newRecords.push(cleanRecord);
       }
     });
 
@@ -561,7 +548,7 @@
     }
 
     items.forEach((item) => {
-      const costume = costumes.find((c) => c.id === item.costumeId);
+      const costume = globalIndex.getCostumeById(item.costumeId);
       if (!costume) {
         skippedCount++;
         skippedItems.push({ name: item.costumeName, reason: '服装档案不存在' });
@@ -586,10 +573,11 @@
         return;
       }
 
-      const costumeIdx = updatedCostumes.findIndex((c) => c.id === costume.id);
-      if (costumeIdx !== -1) {
-        const oldLocation = updatedCostumes[costumeIdx].location || '未设置';
-        updatedCostumes[costumeIdx] = { ...updatedCostumes[costumeIdx], location: targetLoc };
+      const costumeById = updatedCostumes.find((c) => c.id === costume.id);
+      if (costumeById) {
+        const oldLocation = costumeById.location || '未设置';
+        const idx = updatedCostumes.indexOf(costumeById);
+        updatedCostumes[idx] = { ...costumeById, location: targetLoc };
         successCount++;
 
         const sourceLabel = useActual && item.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH && item.actualLocation && item.actualLocation.trim()
@@ -635,7 +623,7 @@
     const skippedItems = [];
 
     items.forEach((item) => {
-      const costume = costumes.find((c) => c.id === item.costumeId);
+      const costume = globalIndex.getCostumeById(item.costumeId);
       if (!costume) {
         skippedCount++;
         skippedItems.push({ name: item.costumeName, reason: '服装档案不存在' });
@@ -649,10 +637,11 @@
       }
 
       const borrower = costume.borrower;
-      const costumeIdx = updatedCostumes.findIndex((c) => c.id === costume.id);
-      if (costumeIdx !== -1) {
-        updatedCostumes[costumeIdx] = {
-          ...updatedCostumes[costumeIdx],
+      const costumeById = updatedCostumes.find((c) => c.id === costume.id);
+      if (costumeById) {
+        const idx = updatedCostumes.indexOf(costumeById);
+        updatedCostumes[idx] = {
+          ...costumeById,
           borrower: '',
           due: '',
           status: '在库',
@@ -738,8 +727,7 @@
   $: selectedItemsWithActiveRepairWO = selectedItemsForBatch.filter((i) => hasActiveWorkOrder(i.costumeId, '维修')).length;
   $: selectedItemsWithAnyActiveWO = selectedItemsForBatch.filter((i) => hasActiveWorkOrder(i.costumeId, null)).length;
   $: selectedItemsBorrowed = selectedItemsForBatch.filter((i) => {
-    const costumes = getAll(TABLES.costumes);
-    const c = costumes.find((cs) => cs.id === i.costumeId);
+    const c = globalIndex.getCostumeById(i.costumeId);
     return c && c.status === '借出';
   }).length;
   $: selectedLocationWithActual = selectedItemsForBatch.filter((i) =>

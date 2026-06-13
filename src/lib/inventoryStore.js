@@ -1,4 +1,5 @@
-import { getAll, setAll, insertOne, updateOne, updateOneWithEventType, deleteOne, TABLES, EVENT_TYPES, startEventBatch, endEventBatch } from '$lib/database.js';
+import { globalIndex } from './dataIndex.js';
+import { insertOne, insertMany, updateOne, updateMany, updateOneWithEventType, deleteOne, TABLES, EVENT_TYPES, startEventBatch, endEventBatch } from '$lib/database.js';
 
 export const INVENTORY_STATUS = {
   PENDING: '待盘点',
@@ -13,25 +14,34 @@ export const TASK_STATUS = {
   COMPLETED: '已完成'
 };
 
-export function getAllInventoryTasks() {
-  return getAll(TABLES.inventoryTasks);
+export function getAllInventoryTasks(options = {}) {
+  return globalIndex.filterInventoryTasks(options);
 }
 
 export function getInventoryTaskById(id) {
-  const tasks = getAll(TABLES.inventoryTasks);
-  return tasks.find((t) => t.id === id) || null;
+  return globalIndex.getInventoryTaskById(id);
 }
 
-export function getInventoryItemsByTaskId(taskId) {
-  const items = getAll(TABLES.inventoryItems);
-  return items.filter((item) => item.taskId === taskId);
+export function getInventoryItemsByTaskId(taskId, options = {}) {
+  return globalIndex.filterInventoryItems({ taskId, ...options });
+}
+
+export function getInventoryItemsByTaskIdAndStatus(taskId, status) {
+  return globalIndex.getInventoryItemsByTaskIdAndStatus(taskId, status);
+}
+
+export function getInventoryTaskStats(taskId) {
+  return globalIndex.getInventoryTaskStatsCached(taskId);
+}
+
+export function getDiscrepancyItems(taskId) {
+  return globalIndex.getInventoryDiscrepancyItems(taskId);
 }
 
 export function createInventoryTask(name, note = '', playFilter = '全部剧目') {
-  const costumes = getAll(TABLES.costumes);
   const filteredCostumes = playFilter === '全部剧目'
-    ? costumes
-    : costumes.filter((c) => c.play === playFilter);
+    ? globalIndex.getActiveCostumes()
+    : globalIndex.getCostumesByPlayFast(playFilter);
 
   const taskId = crypto.randomUUID();
   const now = new Date().toISOString();
@@ -53,36 +63,32 @@ export function createInventoryTask(name, note = '', playFilter = '全部剧目'
     completedAt: null
   };
 
-  insertOne(TABLES.inventoryTasks, task);
+  const savedTask = insertOne(TABLES.inventoryTasks, task);
 
-  startEventBatch();
-  try {
-    const items = filteredCostumes.map((costume) => ({
-      id: crypto.randomUUID(),
-      taskId,
-      costumeId: costume.id,
-      costumeName: costume.name,
-      costumeSize: costume.size || '',
-      costumePlay: costume.play,
-      expectedLocation: costume.location || '',
-      expectedStatus: costume.status || '在库',
-      expectedClean: costume.clean || '已清洗',
-      actualStatus: INVENTORY_STATUS.PENDING,
-      actualLocation: '',
-      actualClean: '',
-      note: '',
-      checkedAt: null,
-      createdAt: now,
-      updatedAt: now
-    }));
+  const items = filteredCostumes.map((costume) => ({
+    id: crypto.randomUUID(),
+    taskId,
+    costumeId: costume.id,
+    costumeName: costume.name,
+    costumeSize: costume.size || '',
+    costumePlay: costume.play,
+    expectedLocation: costume.location || '',
+    expectedStatus: costume.status || '在库',
+    expectedClean: costume.clean || '已清洗',
+    actualStatus: INVENTORY_STATUS.PENDING,
+    actualLocation: '',
+    actualClean: '',
+    note: '',
+    checkedAt: null,
+    createdAt: now,
+    updatedAt: now
+  }));
 
-    const allItems = getAll(TABLES.inventoryItems);
-    setAll(TABLES.inventoryItems, [...items, ...allItems]);
-  } finally {
-    endEventBatch();
-  }
+  insertMany(TABLES.inventoryItems, items, { batchNote: 'inventory_task_creation' });
 
-  return task;
+  globalIndex.invalidateInventoryTaskStats(null);
+
+  return savedTask;
 }
 
 export function updateInventoryItemStatus(itemId, status, actualLocation = '', actualClean = '', note = '') {
@@ -102,30 +108,7 @@ export function updateInventoryItemStatus(itemId, status, actualLocation = '', a
 }
 
 export function recalculateTaskStats(taskId) {
-  const items = getInventoryItemsByTaskId(taskId);
-  const stats = {
-    completedCount: 0,
-    normalCount: 0,
-    missingCount: 0,
-    locationMismatchCount: 0,
-    statusMismatchCount: 0
-  };
-
-  items.forEach((item) => {
-    if (item.actualStatus !== INVENTORY_STATUS.PENDING) {
-      stats.completedCount++;
-    }
-    if (item.actualStatus === INVENTORY_STATUS.NORMAL) {
-      stats.normalCount++;
-    } else if (item.actualStatus === INVENTORY_STATUS.MISSING) {
-      stats.missingCount++;
-    } else if (item.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH) {
-      stats.locationMismatchCount++;
-    } else if (item.actualStatus === INVENTORY_STATUS.STATUS_MISMATCH) {
-      stats.statusMismatchCount++;
-    }
-  });
-
+  const stats = globalIndex.updateInventoryItemStats(taskId);
   return updateOne(TABLES.inventoryTasks, taskId, stats);
 }
 
@@ -147,20 +130,53 @@ export function reopenInventoryTask(taskId) {
 }
 
 export function deleteInventoryTask(taskId) {
-  const items = getAll(TABLES.inventoryItems);
-  const remainingItems = items.filter((item) => item.taskId !== taskId);
-  setAll(TABLES.inventoryItems, remainingItems);
+  const items = globalIndex.filterInventoryItems({ taskId });
+  for (const item of items) {
+    deleteOne(TABLES.inventoryItems, item.id);
+  }
+  globalIndex.invalidateInventoryTaskStats(taskId);
   return deleteOne(TABLES.inventoryTasks, taskId);
 }
 
-export function getDiscrepancyItems(taskId) {
-  const items = getInventoryItemsByTaskId(taskId);
-  return items.filter(
-    (item) =>
-      item.actualStatus === INVENTORY_STATUS.MISSING ||
-      item.actualStatus === INVENTORY_STATUS.LOCATION_MISMATCH ||
-      item.actualStatus === INVENTORY_STATUS.STATUS_MISMATCH
-  );
+export function batchUpdateInventoryItems(itemIds, updates) {
+  const now = new Date().toISOString();
+  const taskIds = new Set();
+
+  const items = globalIndex.filterInventoryItems({});
+  const itemMap = new Map(items.map(i => [i.id, i]));
+
+  const updatesArray = itemIds
+    .map(id => {
+      const oldItem = itemMap.get(id);
+      if (!oldItem) return null;
+      taskIds.add(oldItem.taskId);
+      return {
+        id,
+        updates: {
+          ...updates,
+          checkedAt: now
+        },
+        eventType: EVENT_TYPES.INVENTORY_CHECK,
+        note: '批量更新'
+      };
+    })
+    .filter(Boolean);
+
+  const results = updateMany(TABLES.inventoryItems, updatesArray, { batchNote: 'batch_inventory_update' });
+
+  for (const taskId of taskIds) {
+    recalculateTaskStats(taskId);
+  }
+
+  return results;
+}
+
+export function filterInventoryItems(options = {}) {
+  return globalIndex.filterInventoryItems(options);
+}
+
+export function filterInventoryTasks(options = {}) {
+  return globalIndex.filterInventoryTasks(options);
 }
 
 export function formatTime(isoString) {

@@ -1,6 +1,6 @@
 <script>
-  import { onMount } from 'svelte';
-  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal, Package, Printer, Box, AlertOctagon, Database, RefreshCw, HardDrive, LayoutGrid, ClipboardList, ArrowRightLeft } from 'lucide-svelte';
+  import { onMount, tick } from 'svelte';
+  import { Archive, CheckCircle2, Clock, Search, Shirt, Undo2, X, Trash2, Save, Download, Upload, AlertTriangle, CheckCircle, List, Plus, RotateCcw, Calendar, User, Users, XCircle, CalendarDays, Wrench, Droplets, Eye, MoreHorizontal, Package, Printer, Box, AlertOctagon, Database, RefreshCw, HardDrive, LayoutGrid, ClipboardList, ArrowRightLeft, Activity, Zap } from 'lucide-svelte';
   import {
     initializeDatabase,
     getAll,
@@ -9,6 +9,13 @@
     updateOne,
     updateOneWithEventType,
     deleteOne,
+    softDeleteOne,
+    purgeOne,
+    restoreOne,
+    getTombstones,
+    getDeletedRecords,
+    cleanupReferencesForCostume,
+    getReferencesForCostume,
     downloadBackup,
     readBackupFile,
     importFullDatabase,
@@ -23,15 +30,52 @@
     recordSyncEvent,
     TABLES,
     TABLE_LABELS,
-    EVENT_TYPES
+    EVENT_TYPES,
+    SOFT_DELETE_TABLES
   } from '$lib/database.js';
+  import { globalIndex } from '$lib/dataIndex.js';
   import ScheduleKanban from '$lib/ScheduleKanban.svelte';
   import RiskCenter from '$lib/RiskCenter.svelte';
   import {
     getAllSchedules,
     getAllRiskStatuses,
-    compute30DayRisks,
-    getRiskStats
+    updateRiskProcessingStatus,
+    autoLinkCostumes,
+    generatePackingListFromSchedule,
+    getSchedulesForCostume,
+    getReservationsForCostume,
+    getWorkOrdersForSchedule,
+    getPackingListsForSchedule,
+    allRisks,
+    riskStats,
+    summaryStats,
+    uniquePlays,
+    upcomingSchedules,
+    allCostumes,
+    allActiveCostumes,
+    allRecords,
+    allReservations,
+    allWorkOrders,
+    allActors,
+    allPackingLists,
+    allSchedules,
+    allInventoryTasks,
+    allInventoryItems,
+    overdueCount,
+    borrowedCount,
+    cleanWaitCount,
+    activeReservationCount,
+    pendingWorkOrderCount,
+    inProgressWorkOrderCount,
+    completedWorkOrderCount,
+    overdueWorkOrderCount,
+    scheduleCount,
+    costumesAvailableForWorkOrder,
+    getIndexStats,
+    refreshRisks,
+    getPerformanceStats,
+    getIndexSummary,
+    clearAllCaches
   } from '$lib/scheduleStore.js';
   import InventoryPanel from '$lib/InventoryPanel.svelte';
   import InventoryDetail from '$lib/InventoryDetail.svelte';
@@ -41,6 +85,7 @@
     createDefaultDecisions,
     applyMerge
   } from '$lib/mergeUtils.js';
+  import { generateSampleData, runPerformanceTests } from '$lib/sampleDataGenerator.js';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -49,49 +94,49 @@
     return date.toISOString().slice(0, 10);
   };
 
-  const seed = [
-    { id: crypto.randomUUID(), name: '湖蓝长袍', size: 'M', play: '海上信笺', location: '二楼A柜', clean: '已清洗', borrower: '许舟', due: iso(-2), status: '借出', note: '领口需复查' },
-    { id: crypto.randomUUID(), name: '旧式邮差外套', size: 'L', play: '海上信笺', location: '二楼B柜', clean: '待清洗', borrower: '', due: '', status: '在库', note: '' },
-    { id: crypto.randomUUID(), name: '黑色燕尾服', size: 'XL', play: '午夜排练', location: '一楼贵重衣架', clean: '已清洗', borrower: '陈一', due: iso(3), status: '借出', note: '含配套领结' }
-  ];
+  $: costumes = $allCostumes;
+  $: activeCostumes = $allActiveCostumes;
+  $: records = $allRecords;
+  $: workOrders = $allWorkOrders;
+  $: schedules = $allSchedules;
+  $: reservations = $allReservations;
+  $: packingLists = $allPackingLists;
+  $: inventoryTasks = $allInventoryTasks;
+  $: inventoryItems = $allInventoryItems;
+  $: actors = $allActors;
+  $: events = globalIndex.getAllEvents();
+  $: riskStatuses = globalIndex.getAllRiskStatuses();
+  $: syncQueue = globalIndex.getAllSyncQueue();
+  $: indexStats = globalIndex.getPerformanceStats();
 
-  const seedReservations = [
-    { id: crypto.randomUUID(), costumeId: seed[1].id, costumeName: seed[1].name, play: seed[1].play, date: iso(5), type: '演员', reservedFor: '林婉', createdAt: new Date().toISOString(), status: 'active', note: '下午场排练使用' },
-    { id: crypto.randomUUID(), costumeId: seed[1].id, costumeName: seed[1].name, play: seed[1].play, date: iso(10), type: '场次', reservedFor: '第三幕联排', createdAt: new Date().toISOString(), status: 'active', note: '' }
-  ];
+  $: filtered = globalIndex.filterCostumes({
+    query,
+    play: playFilter === '全部剧目' ? undefined : playFilter,
+    onlyOverdue: showOverdue
+  });
 
-  const seedWorkOrders = [
-    { id: crypto.randomUUID(), type: '清洗', costumeId: seed[1].id, costumeName: seed[1].name, play: seed[1].play, status: '待清洗', assignee: '张阿姨', dueDate: iso(2), note: '袖口有明显污渍，需要重点处理', createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() },
-    { id: crypto.randomUUID(), type: '维修', costumeId: seed[0].id, costumeName: seed[0].name, play: seed[0].play, status: '维修中', assignee: '李师傅', dueDate: iso(5), note: '领口脱线，需要缝补', createdAt: new Date(Date.now() - 86400000).toISOString(), updatedAt: new Date().toISOString() }
-  ];
+  $: filteredRecords = globalIndex.filterRecords({
+    query: recordQuery
+  });
 
-  const seedActors = [
-    { id: crypto.randomUUID(), name: '许舟', size: 'M', plays: ['海上信笺'], note: '身材匀称，偏好稍宽松版型' },
-    { id: crypto.randomUUID(), name: '陈一', size: 'XL', plays: ['午夜排练'], note: '' },
-    { id: crypto.randomUUID(), name: '林婉', size: 'S', plays: ['海上信笺', '午夜排练'], note: '身高162，肩膀较窄' }
-  ];
+  $: filteredReservations = globalIndex.filterReservations({
+    query: reservationQuery,
+    status: reservationFilter === '全部' ? undefined : reservationFilter
+  });
 
-  const seedPackingLists = [
-    {
-      id: crypto.randomUUID(),
-      play: '海上信笺',
-      performanceDate: iso(3),
-      name: '首演装箱单',
-      note: '首演全套服装，含配饰',
-      createdAt: new Date().toISOString(),
-      items: [
-        { costumeId: seed[0].id, costumeName: seed[0].name, size: seed[0].size, location: seed[0].location, status: '已打包', note: '' },
-        { costumeId: seed[1].id, costumeName: seed[1].name, size: seed[1].size, location: seed[1].location, status: '需清洗', note: '袖口有污渍' }
-      ]
-    }
-  ];
+  $: filteredWorkOrders = globalIndex.filterWorkOrders({
+    query: workOrderQuery,
+    status: workOrderFilter === '全部' ? undefined : workOrderFilter,
+    type: workOrderTypeFilter === '全部' ? undefined : workOrderTypeFilter
+  });
 
-  let costumes = seed;
-  let reservations = seedReservations;
-  let workOrders = seedWorkOrders;
-  let actors = seedActors;
-  let packingLists = seedPackingLists;
-  let schedules = [];
+  $: filteredPackingLists = globalIndex.filterPackingLists({
+    query: packingListQuery,
+    status: packingListFilter === '全部' ? undefined : packingListFilter
+  });
+
+  $: uniquePlaysList = globalIndex.getAllPlays();
+
   let packingListQuery = '';
   let packingListFilter = '全部';
   let showPackingListModal = false;
@@ -120,7 +165,6 @@
   let importPreview = [];
   let importSkipped = [];
   let importFile = null;
-  let records = [];
   let recordQuery = '';
   let lendingId = null;
   let lendingBorrower = '';
@@ -153,7 +197,6 @@
   let showDeleteActorConfirm = false;
   let lendingActorId = '';
 
-  let inventoryTasks = [];
   let showInventoryDetail = false;
   let selectedInventoryTaskId = null;
   let inventoryPanelRef = null;
@@ -162,11 +205,15 @@
   let showDataManager = false;
   let showScheduleKanban = false;
   let showRiskCenter = false;
-  let riskStatuses = [];
   let restorePreview = null;
   let restoreFileContent = '';
   let restoreError = '';
   let dbMigrationNotice = '';
+  let showDeletedRecords = false;
+  let deletedRecordFilter = 'costumes';
+  let showTombstoneHistory = false;
+  $: currentDeletedRecords = getDeletedRecords(deletedRecordFilter);
+  $: allTombstones = getTombstones();
 
   let showMergePanel = false;
   let mergeFileName = '';
@@ -176,20 +223,25 @@
   let mergeError = '';
   let mergeSuccess = '';
 
+  let showPerformancePanel = false;
+  let sampleDataConfig = {
+    costumeCount: 500,
+    scheduleCount: 200,
+    recordCount: 2000,
+    inventoryItemCount: 5000,
+    packingListCount: 100,
+    workOrderCount: 300,
+    reservationCount: 800
+  };
+  let performanceTestResults = null;
+  let isGeneratingData = false;
+  let isRunningTests = false;
+
   onMount(() => {
     const hadLegacy = isLegacyDataPresent();
-    const db = initializeDatabase();
-    costumes = db.tables[TABLES.costumes] || [];
-    records = db.tables[TABLES.records] || [];
-    reservations = db.tables[TABLES.reservations] || [];
-    workOrders = db.tables[TABLES.workOrders] || [];
-    actors = db.tables[TABLES.actors] || [];
-    packingLists = db.tables[TABLES.packingLists] || [];
-    schedules = db.tables[TABLES.schedules] || [];
-    inventoryTasks = db.tables[TABLES.inventoryTasks] || [];
-    riskStatuses = db.tables[TABLES.riskStatuses] || [];
+    initializeDatabase();
     dbStats = getDBStats();
-    if (hadLegacy && db.migratedAt) {
+    if (hadLegacy) {
       dbMigrationNotice = '检测到旧版数据已自动迁移到新版数据层，可在数据管理中查看详情。';
     }
 
@@ -198,8 +250,7 @@
   });
 
   function handleRiskCenterChange() {
-    const db = initializeDatabase();
-    riskStatuses = db.tables[TABLES.riskStatuses] || [];
+    refreshRisks();
     refreshDBStats();
   }
 
@@ -209,31 +260,13 @@
   }
 
   function handleInventoryUpdated() {
-    const db = initializeDatabase();
-    costumes = db.tables[TABLES.costumes] || [];
-    records = db.tables[TABLES.records] || [];
-    reservations = db.tables[TABLES.reservations] || [];
-    workOrders = db.tables[TABLES.workOrders] || [];
-    actors = db.tables[TABLES.actors] || [];
-    packingLists = db.tables[TABLES.packingLists] || [];
-    schedules = db.tables[TABLES.schedules] || [];
-    inventoryTasks = db.tables[TABLES.inventoryTasks] || [];
-    riskStatuses = db.tables[TABLES.riskStatuses] || [];
     refreshDBStats();
     inventoryPanelRef?.refresh?.();
   }
 
-  $: allRisks = compute30DayRisks(costumes, reservations, workOrders, packingLists);
-  $: riskStats = getRiskStats(allRisks);
-
   function closeInventoryDetail() {
     showInventoryDetail = false;
     selectedInventoryTaskId = null;
-    const db = initializeDatabase();
-    costumes = db.tables[TABLES.costumes] || [];
-    records = db.tables[TABLES.records] || [];
-    workOrders = db.tables[TABLES.workOrders] || [];
-    inventoryTasks = db.tables[TABLES.inventoryTasks] || [];
     refreshDBStats();
   }
 
@@ -278,6 +311,68 @@
 
   function refreshDBStats() {
     dbStats = getDBStats();
+  }
+
+  async function handleGenerateSampleData() {
+    if (!confirm('生成大样本数据将覆盖当前所有数据，确定要继续吗？请确保已备份重要数据。')) {
+      return;
+    }
+
+    isGeneratingData = true;
+    performanceTestResults = null;
+
+    try {
+      await tick();
+      const result = await generateSampleData(sampleDataConfig);
+      performanceTestResults = {
+        ...performanceTestResults,
+        dataGeneration: result
+      };
+      refreshDBStats();
+    } catch (error) {
+      console.error('生成样本数据失败:', error);
+      performanceTestResults = {
+        ...performanceTestResults,
+        error: error.message
+      };
+    } finally {
+      isGeneratingData = false;
+    }
+  }
+
+  async function handleRunPerformanceTests() {
+    isRunningTests = true;
+
+    try {
+      await tick();
+      const results = await runPerformanceTests(globalIndex);
+      performanceTestResults = {
+        ...performanceTestResults,
+        ...results
+      };
+    } catch (error) {
+      console.error('性能测试失败:', error);
+      performanceTestResults = {
+        ...performanceTestResults,
+        error: error.message
+      };
+    } finally {
+      isRunningTests = false;
+    }
+  }
+
+  function clearPerformanceResults() {
+    performanceTestResults = null;
+  }
+
+  function formatTime(ms) {
+    if (ms < 1) return '<1ms';
+    if (ms < 1000) return `${ms.toFixed(2)}ms`;
+    return `${(ms / 1000).toFixed(2)}s`;
+  }
+
+  function formatNumber(num) {
+    return num?.toLocaleString() || '0';
   }
 
   async function handleRestoreFile(e) {
@@ -332,6 +427,9 @@
   function confirmRestore() {
     if (!restorePreview || !restoreFileContent) return;
     if (!confirm('恢复将覆盖当前所有数据，确定继续吗？此操作不可撤销。')) return;
+
+    const currentTombstones = getTombstones();
+
     if (restorePreview.legacyFormat) {
       try {
         const arr = JSON.parse(restoreFileContent);
@@ -355,6 +453,24 @@
         return;
       }
     }
+
+    if (currentTombstones.length > 0) {
+      const db = getFullDB();
+      const existingTombstoneKeys = new Set(
+        (db.tables[TABLES.tombstones] || []).map((t) => `${t.table}|${t.recordId}`)
+      );
+      const mergedTombstones = [...(db.tables[TABLES.tombstones] || [])];
+      for (const ts of currentTombstones) {
+        const key = `${ts.table}|${ts.recordId}`;
+        if (!existingTombstoneKeys.has(key)) {
+          mergedTombstones.push(ts);
+          existingTombstoneKeys.add(key);
+        }
+      }
+      db.tables[TABLES.tombstones] = mergedTombstones;
+      saveFullDB(db);
+    }
+
     const db = initializeDatabase();
     costumes = db.tables[TABLES.costumes] || [];
     records = db.tables[TABLES.records] || [];
@@ -470,10 +586,64 @@
     refreshDBStats();
   }
 
+  function handleRestoreDeletedRecord(table, id) {
+    const restored = restoreOne(table, id);
+    if (restored) {
+      if (table === TABLES.costumes) costumes = getAll(TABLES.costumes);
+      else if (table === TABLES.actors) actors = getAll(TABLES.actors);
+      else if (table === TABLES.schedules) schedules = getAll(TABLES.schedules);
+      else if (table === TABLES.workOrders) workOrders = getAll(TABLES.workOrders);
+      else if (table === TABLES.reservations) reservations = getAll(TABLES.reservations);
+      else if (table === TABLES.packingLists) packingLists = getAll(TABLES.packingLists);
+      refreshDBStats();
+    }
+  }
+
+  function handlePurgeDeletedRecord(table, id) {
+    if (!confirm('确定要永久删除此记录吗？此操作不可撤销，记录将从数据库中彻底移除。')) return;
+    purgeOne(table, id);
+    if (table === TABLES.costumes) costumes = getAll(TABLES.costumes);
+    else if (table === TABLES.actors) actors = getAll(TABLES.actors);
+    else if (table === TABLES.schedules) schedules = getAll(TABLES.schedules);
+    else if (table === TABLES.workOrders) workOrders = getAll(TABLES.workOrders);
+    else if (table === TABLES.reservations) reservations = getAll(TABLES.reservations);
+    else if (table === TABLES.packingLists) packingLists = getAll(TABLES.packingLists);
+    refreshDBStats();
+  }
+
+  function handlePurgeAllDeleted(table) {
+    const deleted = getDeletedRecords(table);
+    if (deleted.length === 0) return;
+    if (!confirm(`确定要永久删除 ${TABLE_LABELS[table]} 中的 ${deleted.length} 条已删除记录吗？此操作不可撤销。`)) return;
+    for (const rec of deleted) {
+      purgeOne(table, rec.id);
+    }
+    if (table === TABLES.costumes) costumes = getAll(TABLES.costumes);
+    else if (table === TABLES.actors) actors = getAll(TABLES.actors);
+    else if (table === TABLES.schedules) schedules = getAll(TABLES.schedules);
+    else if (table === TABLES.workOrders) workOrders = getAll(TABLES.workOrders);
+    else if (table === TABLES.reservations) reservations = getAll(TABLES.reservations);
+    else if (table === TABLES.packingLists) packingLists = getAll(TABLES.packingLists);
+    refreshDBStats();
+  }
+
+  function getDeletedRecordTitle(table, record) {
+    if (!record) return '(无)';
+    switch (table) {
+      case TABLES.costumes: return record.name || record.id?.slice(0, 8);
+      case TABLES.actors: return record.name || record.id?.slice(0, 8);
+      case TABLES.reservations: return `${record.costumeName || '服装'} - ${record.reservedFor || ''}`;
+      case TABLES.workOrders: return `${record.type || ''} - ${record.costumeName || record.id?.slice(0, 8)}`;
+      case TABLES.packingLists: return record.name || record.id?.slice(0, 8);
+      case TABLES.schedules: return `${record.play || ''} ${record.date || ''}`;
+      default: return record.id?.slice(0, 8) || '记录';
+    }
+  }
+
   const packingItemStatuses = ['未标记', '已打包', '缺失', '需清洗', '已归还'];
 
   function getCostumeAlert(costumeId) {
-    const costume = costumes.find((c) => c.id === costumeId);
+    const costume = globalIndex.getCostumeById(costumeId);
     if (!costume) return null;
     const alerts = [];
     if (costume.status === '借出') {
@@ -511,7 +681,7 @@
   }
 
   function openEditPackingList(id) {
-    const list = packingLists.find((pl) => pl.id === id);
+    const list = globalIndex.getPackingListById(id);
     if (!list) return;
     creatingPackingList = false;
     editingPackingListId = id;
@@ -566,7 +736,7 @@
   }
 
   function updatePackingItemStatus(listId, costumeId, status) {
-    const list = packingLists.find((pl) => pl.id === listId);
+    const list = globalIndex.getPackingListById(listId);
     if (!list) return;
     const newList = {
       ...list,
@@ -590,7 +760,7 @@
   }
 
   function updatePackingItemNote(listId, costumeId, note) {
-    const list = packingLists.find((pl) => pl.id === listId);
+    const list = globalIndex.getPackingListById(listId);
     if (!list) return;
     const newList = {
       ...list,
@@ -664,16 +834,17 @@
   }
 
   function deletePackingList(id) {
-    const list = packingLists.find((pl) => pl.id === id);
+    const list = globalIndex.getPackingListById(id);
     if (!list) return;
-    if (!confirm(`确定要删除装箱单「${list.name}」吗？此操作不可撤销。`)) return;
-    packingLists = packingLists.filter((pl) => pl.id !== id);
-    persistPackingLists();
+    if (!confirm(`确定要删除装箱单「${list.name}」吗？此操作可通过墓碑记录在数据管理中恢复。`)) return;
+    deleteOne(TABLES.packingLists, id);
+    packingLists = getAll(TABLES.packingLists);
     if (selectedPackingListId === id) {
       selectedPackingListId = null;
       showPackingListDetail = false;
     }
     addRecord('装箱单删除', { name: list.name, play: list.play }, '系统', `删除装箱单「${list.name}」`);
+    refreshDBStats();
   }
 
   function handleGeneratePackingListFromSchedule(e) {
@@ -770,11 +941,11 @@
   }
 
   function getActorById(id) {
-    return actors.find((a) => a.id === id);
+    return globalIndex.getActorById(id);
   }
 
   function getActorsByPlay(play) {
-    return actors.filter((a) => Array.isArray(a.plays) && a.plays.includes(play));
+    return globalIndex.getActorsByPlay(play);
   }
 
   function getMatchBadgeClass(level) {
@@ -785,48 +956,23 @@
   }
 
   function findActorByName(name) {
-    if (!name || !name.trim()) return null;
-    const trimmed = name.trim();
-    return actors.find((a) => a.name === trimmed) || null;
+    return globalIndex.findActorByName(name);
   }
 
   function searchActorsByName(name) {
-    if (!name || !name.trim()) return [];
-    const trimmed = name.trim().toLowerCase();
-    return actors.filter((a) => a.name.toLowerCase().includes(trimmed));
+    return globalIndex.searchActorsByName(name);
   }
 
   function getActorBorrowHistory(actorName) {
-    if (!actorName) return [];
-    return records
-      .filter((r) => r.type === '借出' && r.operator === actorName)
-      .sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    return globalIndex.getActorBorrowHistory(actorName);
   }
 
   function getActorReservationHistory(actorName) {
-    if (!actorName) return [];
-    return reservations.filter(
-      (r) => r.type === '演员' && r.reservedFor === actorName
-    );
+    return globalIndex.getActorReservationHistory(actorName);
   }
 
   function getActorCostumeHistory(actorName) {
-    const borrowed = getActorBorrowHistory(actorName);
-    const reserved = getActorReservationHistory(actorName);
-    const costumeMap = new Map();
-
-    for (const r of borrowed) {
-      if (!costumeMap.has(r.costumeName)) {
-        costumeMap.set(r.costumeName, { name: r.costumeName, play: r.play, lastUsed: r.timestamp, type: '借出' });
-      }
-    }
-    for (const r of reserved) {
-      if (!costumeMap.has(r.costumeName)) {
-        costumeMap.set(r.costumeName, { name: r.costumeName, play: r.play, lastUsed: r.date, type: '预约' });
-      }
-    }
-
-    return [...costumeMap.values()].sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed));
+    return globalIndex.getActorCostumeHistory(actorName);
   }
 
   function checkPlayMatch(costumePlay, actorPlays) {
@@ -836,50 +982,15 @@
   }
 
   function getActiveWorkOrder(costumeId) {
-    return workOrders.find((wo) => wo.costumeId === costumeId && (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中'));
+    return globalIndex.getActiveWorkOrder(costumeId);
   }
 
   function canLend(costumeId) {
-    const costume = costumes.find((c) => c.id === costumeId);
-    if (!costume) return { can: false, reason: '服装不存在' };
-    if (costume.status === '借出') return { can: false, reason: '该服装已借出' };
-    if (costume.clean === '待清洗') return { can: false, reason: '该服装待清洗，请先完成清洗' };
-    if (costume.clean === '维修中') return { can: false, reason: '该服装维修中，请先完成维修' };
-    const activeWO = getActiveWorkOrder(costumeId);
-    if (activeWO) return { can: false, reason: `该服装${activeWO.type}中，请先完成${activeWO.type}工单` };
-    return { can: true, reason: '' };
+    return globalIndex.canLend(costumeId);
   }
 
   function checkConflict(costumeId, date, excludeId = null) {
-    const costume = costumes.find((c) => c.id === costumeId);
-    const conflicts = [];
-    if (costume && costume.status === '借出') {
-      const today = new Date(iso(0));
-      const targetDate = new Date(date);
-      if (costume.due) {
-        const borrowDue = new Date(costume.due);
-        const isOverdue = borrowDue < today;
-        if (isOverdue) {
-          conflicts.push({ type: '借出', detail: `逾期未还：${costume.borrower}，应还${costume.due}，归还时间不确定` });
-        } else if (targetDate >= today && targetDate <= borrowDue) {
-          conflicts.push({ type: '借出', detail: `${costume.borrower}借用至${costume.due}` });
-        }
-      } else {
-        conflicts.push({ type: '借出', detail: `${costume.borrower}借用中，归还时间不确定` });
-      }
-    }
-    const activeWorkOrder = getActiveWorkOrder(costumeId);
-    if (activeWorkOrder) {
-      conflicts.push({ type: activeWorkOrder.type, detail: `${activeWorkOrder.type}中，负责人：${activeWorkOrder.assignee || '未分配'}，预计完成：${activeWorkOrder.dueDate}` });
-    }
-    reservations.forEach((r) => {
-      if (r.status !== 'active') return;
-      if (excludeId && r.id === excludeId) return;
-      if (r.costumeId === costumeId && r.date === date) {
-        conflicts.push({ type: '预约', detail: `${r.type}：${r.reservedFor}（${r.date}）` });
-      }
-    });
-    return conflicts;
+    return globalIndex.checkConflict(costumeId, date, excludeId);
   }
 
   function createWorkOrder(type, costume, assignee = '', note = '') {
@@ -921,7 +1032,7 @@
   }
 
   function updateWorkOrderStatus(id, newStatus) {
-    const workOrder = workOrders.find((wo) => wo.id === id);
+    const workOrder = globalIndex.getWorkOrderById(id);
     if (!workOrder) return;
     const costume = { name: workOrder.costumeName, play: workOrder.play };
     workOrders = workOrders.map((wo) => wo.id === id ? { ...wo, status: newStatus, updatedAt: new Date().toISOString() } : wo);
@@ -929,7 +1040,7 @@
     addRecord('工单更新', costume, '系统', `工单「${id.slice(0, 8)}」状态从「${workOrder.status}」变更为「${newStatus}」`);
 
     if (newStatus === '已完成' && workOrder.type === '清洗') {
-      const costumeToUpdate = costumes.find((c) => c.id === workOrder.costumeId);
+      const costumeToUpdate = globalIndex.getCostumeById(workOrder.costumeId);
       if (costumeToUpdate && costumeToUpdate.clean === '待清洗') {
         costumes = costumes.map((c) => c.id === workOrder.costumeId ? { ...c, clean: '已清洗' } : c);
         persist();
@@ -938,7 +1049,7 @@
     }
 
     if (newStatus === '已完成' && workOrder.type === '维修') {
-      const costumeToUpdate = costumes.find((c) => c.id === workOrder.costumeId);
+      const costumeToUpdate = globalIndex.getCostumeById(workOrder.costumeId);
       if (costumeToUpdate && costumeToUpdate.clean === '维修中') {
         costumes = costumes.map((c) => c.id === workOrder.costumeId ? { ...c, clean: '已清洗' } : c);
         persist();
@@ -947,7 +1058,7 @@
     }
 
     if (newStatus === '已取消') {
-      const costumeToUpdate = costumes.find((c) => c.id === workOrder.costumeId);
+      const costumeToUpdate = globalIndex.getCostumeById(workOrder.costumeId);
       if (costumeToUpdate) {
         const otherActiveWO = workOrders.find((wo) => wo.costumeId === workOrder.costumeId && wo.id !== id && (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中'));
         if (!otherActiveWO) {
@@ -968,7 +1079,7 @@
     editingWorkOrderId = null;
     const initialStatus = type === '清洗' ? '待清洗' : '待维修';
     if (costumeId) {
-      const costume = costumes.find((c) => c.id === costumeId);
+      const costume = globalIndex.getCostumeById(costumeId);
       if (costume) {
         workOrderForm = {
           type,
@@ -997,7 +1108,7 @@
   }
 
   function openEditWorkOrder(id) {
-    const workOrder = workOrders.find((wo) => wo.id === id);
+    const workOrder = globalIndex.getWorkOrderById(id);
     if (!workOrder) return;
     creatingWorkOrder = false;
     editingWorkOrderId = id;
@@ -1016,7 +1127,7 @@
     if (!workOrderForm.costumeId || !workOrderForm.assignee.trim()) return;
 
     if (creatingWorkOrder) {
-      const costume = costumes.find((c) => c.id === workOrderForm.costumeId);
+      const costume = globalIndex.getCostumeById(workOrderForm.costumeId);
       if (!costume) return;
       const workOrder = {
         id: crypto.randomUUID(),
@@ -1047,7 +1158,7 @@
       persistWorkOrders();
 
       if (workOrderForm.status === '已完成' && workOrderForm.type === '清洗') {
-        const costumeToUpdate = costumes.find((c) => c.id === workOrderForm.costumeId);
+        const costumeToUpdate = globalIndex.getCostumeById(workOrderForm.costumeId);
         if (costumeToUpdate && costumeToUpdate.clean === '待清洗') {
           costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '已清洗' } : c);
           persist();
@@ -1056,7 +1167,7 @@
       }
 
       if (workOrderForm.status === '已完成' && workOrderForm.type === '维修') {
-        const costumeToUpdate = costumes.find((c) => c.id === workOrderForm.costumeId);
+        const costumeToUpdate = globalIndex.getCostumeById(workOrderForm.costumeId);
         if (costumeToUpdate && costumeToUpdate.clean === '维修中') {
           costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '已清洗' } : c);
           persist();
@@ -1065,7 +1176,7 @@
       }
 
       if ((workOrderForm.status === '待清洗' || workOrderForm.status === '清洗中') && workOrderForm.type === '清洗') {
-        const costumeToUpdate = costumes.find((c) => c.id === workOrderForm.costumeId);
+        const costumeToUpdate = globalIndex.getCostumeById(workOrderForm.costumeId);
         if (costumeToUpdate && costumeToUpdate.clean !== '待清洗') {
           costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '待清洗' } : c);
           persist();
@@ -1074,7 +1185,7 @@
       }
 
       if ((workOrderForm.status === '待维修' || workOrderForm.status === '维修中') && workOrderForm.type === '维修') {
-        const costumeToUpdate = costumes.find((c) => c.id === workOrderForm.costumeId);
+        const costumeToUpdate = globalIndex.getCostumeById(workOrderForm.costumeId);
         if (costumeToUpdate && costumeToUpdate.clean !== '维修中') {
           costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '维修中' } : c);
           persist();
@@ -1083,7 +1194,7 @@
       }
 
       if (workOrderForm.status === '已取消') {
-        const costumeToUpdate = costumes.find((c) => c.id === workOrderForm.costumeId);
+        const costumeToUpdate = globalIndex.getCostumeById(workOrderForm.costumeId);
         if (costumeToUpdate) {
           const otherActiveWO = workOrders.find((wo) => wo.costumeId === workOrderForm.costumeId && wo.id !== editingWorkOrderId && (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中'));
           if (!otherActiveWO) {
@@ -1117,15 +1228,11 @@
   }
 
   function getUpcomingReservations(costumeId) {
-    const today = iso(0);
-    return reservations
-      .filter((r) => r.costumeId === costumeId && r.status === 'active' && r.date >= today)
-      .sort((a, b) => new Date(a.date) - new Date(b.date));
+    return globalIndex.getUpcomingReservations(costumeId);
   }
 
   function getLatestReservation(costumeId) {
-    const upcoming = getUpcomingReservations(costumeId);
-    return upcoming.length > 0 ? upcoming[0] : null;
+    return globalIndex.getLatestReservation(costumeId);
   }
 
   function openReserve(id) {
@@ -1140,7 +1247,7 @@
 
   function confirmReserve() {
     if (!reservationForm.reservedFor.trim() || !reservationForm.date) return;
-    const costume = costumes.find((c) => c.id === reservingId);
+    const costume = globalIndex.getCostumeById(reservingId);
     if (!costume) return;
     const conflicts = checkConflict(reservingId, reservationForm.date);
     if (conflicts.length > 0) return;
@@ -1167,7 +1274,7 @@
   }
 
   function cancelReservation(id) {
-    const reservation = reservations.find((r) => r.id === id);
+    const reservation = globalIndex.getReservationById(id);
     if (!reservation) return;
     reservations = reservations.map((r) => r.id === id ? { ...r, status: 'cancelled' } : r);
     persistReservations();
@@ -1242,12 +1349,16 @@
   }
 
   function confirmDeleteActor() {
-    actors = actors.filter((a) => a.id !== selectedActorId);
-    persistActors();
+    const actor = globalIndex.getActorById(selectedActorId);
+    if (!actor) return;
+    if (!confirm(`确定要删除演员「${actor.name}」吗？此操作可通过墓碑记录在数据管理中恢复。`)) return;
+    deleteOne(TABLES.actors, selectedActorId);
+    actors = getAll(TABLES.actors);
     closeActorDetail();
+    refreshDBStats();
   }
 
-  function formatTime(isoString) {
+  function formatDateTime(isoString) {
     const date = new Date(isoString);
     const year = date.getFullYear();
     const month = String(date.getMonth() + 1).padStart(2, '0');
@@ -1258,100 +1369,42 @@
     return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
   }
 
-  $: filteredRecords = records.filter((record) => {
-    const text = `${record.costumeName}${record.play}`;
-    return text.includes(recordQuery.trim());
-  });
-  $: plays = ['全部剧目', ...new Set(costumes.map((item) => item.play).filter(Boolean))];
-  $: filtered = costumes.filter((item) => {
-    const text = `${item.name}${item.size}${item.play}${item.location}${item.borrower}`;
-    const overdue = item.status === '借出' && item.due && new Date(item.due) < new Date(iso(0));
-    return text.includes(query.trim()) && (playFilter === '全部剧目' || item.play === playFilter) && (!showOverdue || overdue);
-  });
-  $: overdueCount = costumes.filter((item) => item.status === '借出' && item.due && new Date(item.due) < new Date(iso(0))).length;
-  $: borrowedCount = costumes.filter((item) => item.status === '借出').length;
-  $: cleanWaitCount = costumes.filter((item) => item.clean === '待清洗').length;
-  $: activeReservationCount = reservations.filter((r) => r.status === 'active').length;
-  $: pendingWorkOrderCount = workOrders.filter((wo) => wo.status === '待清洗' || wo.status === '待维修').length;
-  $: inProgressWorkOrderCount = workOrders.filter((wo) => wo.status === '清洗中' || wo.status === '维修中').length;
-  $: completedWorkOrderCount = workOrders.filter((wo) => wo.status === '已完成').length;
-  $: overdueWorkOrderCount = workOrders.filter((wo) => (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中') && wo.dueDate && new Date(wo.dueDate) < new Date(iso(0))).length;
-  $: scheduleCount = schedules.length;
-  $: filteredWorkOrders = workOrders.filter((wo) => {
-    const text = `${wo.costumeName}${wo.play}${wo.assignee}`;
-    const matchesQuery = text.includes(workOrderQuery.trim());
-    let matchesFilter = true;
-    if (workOrderFilter === '待处理') matchesFilter = wo.status === '待清洗' || wo.status === '待维修';
-    else if (workOrderFilter === '处理中') matchesFilter = wo.status === '清洗中' || wo.status === '维修中';
-    else if (workOrderFilter === '已完成') matchesFilter = wo.status === '已完成';
-    else if (workOrderFilter === '已取消') matchesFilter = wo.status === '已取消';
-    else if (workOrderFilter === '已逾期') matchesFilter = (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中') && wo.dueDate && new Date(wo.dueDate) < new Date(iso(0));
-    let matchesTypeFilter = true;
-    if (workOrderTypeFilter === '清洗') matchesTypeFilter = wo.type === '清洗';
-    else if (workOrderTypeFilter === '维修') matchesTypeFilter = wo.type === '维修';
-    return matchesQuery && matchesFilter && matchesTypeFilter;
-  }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-  $: availableCostumesForWorkOrder = costumes.filter((c) => {
-    const activeWO = getActiveWorkOrder(c.id);
-    return !activeWO && c.status === '在库';
-  });
-  $: selectedWorkOrder = workOrders.find((wo) => wo.id === selectedWorkOrderId);
-  $: filteredReservations = reservations.filter((r) => {
-    const text = `${r.costumeName}${r.play}${r.reservedFor}`;
-    const matchesQuery = text.includes(reservationQuery.trim());
-    const today = iso(0);
-    let matchesFilter = true;
-    if (reservationFilter === '即将到来') matchesFilter = r.status === 'active' && r.date >= today;
-    else if (reservationFilter === '已过期') matchesFilter = r.status === 'active' && r.date < today;
-    else if (reservationFilter === '已取消') matchesFilter = r.status === 'cancelled';
-    else if (reservationFilter === '有效') matchesFilter = r.status === 'active';
-    return matchesQuery && matchesFilter;
-  }).sort((a, b) => new Date(a.date) - new Date(b.date));
-  $: reservingCostume = costumes.find((item) => item.id === reservingId);
-  $: currentConflicts = reservingCostume ? checkConflict(reservingCostume.id, reservationForm.date) : [];
-  $: reservationActor = reservationForm.type === '演员' ? findActorByName(reservationForm.reservedFor) : null;
-  $: reservationActorSuggestions = reservationForm.type === '演员' ? searchActorsByName(reservationForm.reservedFor) : [];
+  $: plays = ['全部剧目', ...globalIndex.getUniqueCostumePlaysSorted()];
+  $: stats_overdueCount = $overdueCount;
+  $: stats_borrowedCount = $borrowedCount;
+  $: stats_cleanWaitCount = $cleanWaitCount;
+  $: stats_activeReservationCount = $activeReservationCount;
+  $: stats_pendingWorkOrderCount = $pendingWorkOrderCount;
+  $: stats_inProgressWorkOrderCount = $inProgressWorkOrderCount;
+  $: stats_completedWorkOrderCount = $completedWorkOrderCount;
+  $: stats_overdueWorkOrderCount = $overdueWorkOrderCount;
+  $: stats_scheduleCount = $scheduleCount;
+  $: availableCostumesForWorkOrder = $costumesAvailableForWorkOrder;
+  $: filteredActors = globalIndex.filterActors({ query: actorQuery });
+  $: selectedWorkOrder = globalIndex.getWorkOrderById(selectedWorkOrderId);
+  $: reservingCostume = globalIndex.getCostumeById(reservingId);
+  $: currentConflicts = reservingCostume ? globalIndex.checkScheduleConflict(reservingCostume.id, reservationForm.date) : [];
+  $: reservationActor = reservationForm.type === '演员' ? globalIndex.findActorByName(reservationForm.reservedFor) : null;
+  $: reservationActorSuggestions = reservationForm.type === '演员' ? globalIndex.searchActorsByName(reservationForm.reservedFor) : [];
   $: reservationSizeMatch = reservingCostume && reservationActor ? matchSize(reservingCostume.size, reservationActor.size) : null;
   $: reservationPlayMatch = reservingCostume && reservationActor ? checkPlayMatch(reservingCostume.play, reservationActor.plays) : null;
   $: reservationActorHistory = reservationActor ? getActorCostumeHistory(reservationActor.name) : [];
-  $: filteredActors = actors.filter((a) => {
-    const text = `${a.name}${a.size}${(a.plays || []).join('')}${a.note}`;
-    return text.includes(actorQuery.trim());
-  });
-  $: selectedActor = actors.find((a) => a.id === selectedActorId);
-  $: lendingActor = actors.find((a) => a.id === lendingActorId);
-  $: lendingActorByBorrower = findActorByName(lendingBorrower);
+  $: selectedActor = globalIndex.getActorById(selectedActorId);
+  $: lendingActor = globalIndex.getActorById(lendingActorId);
+  $: lendingActorByBorrower = globalIndex.findActorByName(lendingBorrower);
   $: lendingActiveActor = lendingActor || lendingActorByBorrower;
   $: lendingSizeMatch = lendingCostume && lendingActiveActor ? matchSize(lendingCostume.size, lendingActiveActor.size) : null;
   $: lendingPlayMatch = lendingCostume && lendingActiveActor ? checkPlayMatch(lendingCostume.play, lendingActiveActor.plays) : null;
-  $: lendingBorrowerSuggestions = searchActorsByName(lendingBorrower);
+  $: lendingBorrowerSuggestions = globalIndex.searchActorsByName(lendingBorrower);
   $: lendingActorHistory = lendingActiveActor ? getActorCostumeHistory(lendingActiveActor.name) : [];
-  $: filteredPackingLists = packingLists.filter((pl) => {
-    const text = `${pl.name}${pl.play}${pl.performanceDate}`;
-    const matchesQuery = text.includes(packingListQuery.trim());
-    const today = iso(0);
-    let matchesFilter = true;
-    if (packingListFilter === '即将演出') matchesFilter = pl.performanceDate >= today;
-    else if (packingListFilter === '已过期') matchesFilter = pl.performanceDate < today;
-    return matchesQuery && matchesFilter;
-  }).sort((a, b) => new Date(a.performanceDate) - new Date(b.performanceDate));
-  $: packingAddAvailableCostumes = costumes.filter((c) => {
-    if (packingAddCostumePlayFilter !== '全部剧目' && c.play !== packingAddCostumePlayFilter) return false;
-    const text = `${c.name}${c.size}${c.play}${c.location}${c.borrower}`;
-    if (!text.includes(packingAddCostumeQuery.trim())) return false;
-    if (packingListForm.items.find((item) => item.costumeId === c.id)) return false;
-    return true;
+  $: selectedPackingList = globalIndex.getPackingListById(selectedPackingListId);
+  $: packingPlays = ['全部剧目', ...globalIndex.getUniqueCostumePlaysSorted()];
+  $: packingSummary = selectedPackingList ? globalIndex.getPackingListSummary(selectedPackingListId) : null;
+  $: packingAddAvailableCostumes = globalIndex.filterCostumesForPackingList({
+    query: packingAddCostumeQuery,
+    play: packingAddCostumePlayFilter === '全部剧目' ? undefined : packingAddCostumePlayFilter,
+    excludeItemIds: packingListForm.items.map((item) => item.costumeId)
   });
-  $: selectedPackingList = packingLists.find((pl) => pl.id === selectedPackingListId);
-  $: packingPlays = ['全部剧目', ...new Set(costumes.map((item) => item.play).filter(Boolean))];
-  $: packingSummary = selectedPackingList ? {
-    total: selectedPackingList.items.length,
-    packed: selectedPackingList.items.filter((item) => item.status === '已打包').length,
-    missing: selectedPackingList.items.filter((item) => item.status === '缺失').length,
-    clean: selectedPackingList.items.filter((item) => item.status === '需清洗').length,
-    returned: selectedPackingList.items.filter((item) => item.status === '已归还').length,
-    pending: selectedPackingList.items.filter((item) => item.status === '未标记').length
-  } : null;
 
   function saveCostume() {
     if (!form.name.trim() || !form.play.trim()) return;
@@ -1385,7 +1438,7 @@
       borrower = lendingActor.name;
     }
     if (!borrower) return;
-    const costume = costumes.find((c) => c.id === lendingId);
+    const costume = globalIndex.getCostumeById(lendingId);
     if (!costume) return;
     const checkResult = canLend(lendingId);
     if (!checkResult.can) {
@@ -1404,7 +1457,7 @@
   }
 
   function returnBack(id) {
-    const costume = costumes.find((c) => c.id === id);
+    const costume = globalIndex.getCostumeById(id);
     if (!costume) return;
     const borrower = costume.borrower;
     costumes = costumes.map((c) => c.id === id ? { ...c, borrower: '', due: '', status: '在库', clean: '待清洗' } : c);
@@ -1414,7 +1467,7 @@
   }
 
   function updateClean(id, clean) {
-    const costume = costumes.find((c) => c.id === id);
+    const costume = globalIndex.getCostumeById(id);
     if (!costume) return;
     const oldClean = costume.clean;
     costumes = costumes.map((c) => c.id === id ? { ...c, clean } : c);
@@ -1456,9 +1509,25 @@
   }
 
   function confirmDelete() {
-    costumes = costumes.filter((item) => item.id !== selectedId);
-    persist();
+    const costume = globalIndex.getCostumeById(selectedId);
+    if (!costume) return;
+    const refs = getReferencesForCostume(selectedId);
+    let msg = `确定要删除服装「${costume.name}」吗？此操作可通过墓碑记录在数据管理中恢复。`;
+    if (refs.length > 0) {
+      msg += `\n\n该服装有以下关联记录将被自动清理：\n${refs.map((r) => '· ' + r.label).join('\n')}`;
+    }
+    if (!confirm(msg)) return;
+    deleteOne(TABLES.costumes, selectedId);
+    if (refs.length > 0) {
+      cleanupReferencesForCostume(selectedId);
+    }
+    costumes = getAll(TABLES.costumes);
+    reservations = getAll(TABLES.reservations);
+    workOrders = getAll(TABLES.workOrders);
+    packingLists = getAll(TABLES.packingLists);
+    schedules = getAll(TABLES.schedules);
     closeDetail();
+    refreshDBStats();
   }
 
   function exportCostumes() {
@@ -1528,8 +1597,8 @@
     importFile = null;
   }
 
-  $: selected = costumes.find((item) => item.id === selectedId);
-  $: lendingCostume = costumes.find((item) => item.id === lendingId);
+  $: selected = globalIndex.getCostumeById(selectedId);
+  $: lendingCostume = globalIndex.getCostumeById(lendingId);
 
   function handleModalKeydown(e) {
     if (e.key === 'Escape') {
@@ -1591,6 +1660,9 @@
       </button>
       <button type="button" class="hero-data-btn hero-risk-btn" class:has-risk={riskStats.pending > 0 || riskStats.high > 0} on:click={() => showRiskCenter = !showRiskCenter}>
         <AlertTriangle size={16} />风险中心{#if riskStats.pending > 0}<span class="hero-risk-badge">{riskStats.pending}</span>{/if}
+      </button>
+      <button type="button" class="hero-data-btn" on:click={() => showPerformancePanel = !showPerformancePanel}>
+        <Zap size={16} />性能测试
       </button>
     </div>
   </header>
@@ -1927,7 +1999,7 @@
               {#if workOrder.note} · 备注：{workOrder.note}{/if}
             </p>
             <div class="record-footer">
-              <span class="record-operator">创建时间：{formatTime(workOrder.createdAt)}</span>
+              <span class="record-operator">创建时间：{formatDateTime(workOrder.createdAt)}</span>
               <div style="display: flex; gap: 6px;">
                 {#if workOrder.status !== '已完成' && workOrder.status !== '已取消'}
                   {#each getAvailableStatuses(workOrder).filter((s) => s !== workOrder.status) as status}
@@ -1998,7 +2070,7 @@
               {#if reservation.note} · 备注：{reservation.note}{/if}
             </p>
             <div class="record-footer">
-              <span class="record-operator">创建时间：{formatTime(reservation.createdAt)}</span>
+              <span class="record-operator">创建时间：{formatDateTime(reservation.createdAt)}</span>
               {#if reservation.status === 'active'}
                 <button type="button" class="danger-outline small-btn" on:click={() => cancelReservation(reservation.id)}>
                   <XCircle size={12} />取消预约
@@ -2061,7 +2133,7 @@
             <p class="record-summary">{record.summary}</p>
             <div class="record-footer">
               <span class="record-operator">操作者：{record.operator}</span>
-              <span class="record-time">{formatTime(record.timestamp)}</span>
+              <span class="record-time">{formatDateTime(record.timestamp)}</span>
             </div>
           </div>
         </div>
@@ -2129,7 +2201,7 @@
               {#if pl.note} · 备注：{pl.note}{/if}
             </p>
             <div class="record-footer">
-              <span class="record-operator">创建时间：{formatTime(pl.createdAt)}</span>
+              <span class="record-operator">创建时间：{formatDateTime(pl.createdAt)}</span>
               <div style="display: flex; gap: 6px;">
                 <button type="button" class="small-btn" on:click={() => openPackingListDetail(pl.id)}>
                   <Eye size={12} />查看/打印
@@ -2189,7 +2261,7 @@
 
         {#if showDeleteConfirm}
           <div class="confirm-box">
-            <p>确定要删除「{selected.name}」的档案吗？此操作不可撤销。</p>
+            <p>确定要删除「{selected.name}」的档案吗？此操作可通过墓碑记录在数据管理中恢复。</p>
             <div class="confirm-actions">
               <button type="button" class="secondary" on:click={cancelDelete}>取消</button>
               <button type="button" class="danger" on:click={confirmDelete}><Trash2 size={16} />确认删除</button>
@@ -2270,7 +2342,7 @@
 
         {#if showDeleteActorConfirm}
           <div class="confirm-box">
-            <p>确定要删除「{selectedActor.name}」的档案吗？此操作不可撤销。</p>
+            <p>确定要删除「{selectedActor.name}」的档案吗？此操作可通过墓碑记录在数据管理中恢复。</p>
             <div class="confirm-actions">
               <button type="button" class="secondary" on:click={cancelDeleteActor}>取消</button>
               <button type="button" class="danger" on:click={confirmDeleteActor}><Trash2 size={16} />确认删除</button>
@@ -2761,7 +2833,7 @@
           <label>
             <span>选择服装</span>
             <select bind:value={workOrderForm.costumeId} disabled={!creatingWorkOrder} on:change={() => {
-              const c = costumes.find((cost) => cost.id === workOrderForm.costumeId);
+              const c = globalIndex.getCostumeById(workOrderForm.costumeId);
               if (c) {
                 workOrderForm.costumeName = c.name;
                 workOrderForm.play = c.play;
@@ -2840,8 +2912,8 @@
           <div class="status-info">
             <p><strong>负责人：</strong>{selectedWorkOrder.assignee || '未分配'}</p>
             <p><strong>截止日期：</strong>{selectedWorkOrder.dueDate}</p>
-            <p><strong>创建时间：</strong>{formatTime(selectedWorkOrder.createdAt)}</p>
-            <p><strong>更新时间：</strong>{formatTime(selectedWorkOrder.updatedAt)}</p>
+            <p><strong>创建时间：</strong>{formatDateTime(selectedWorkOrder.createdAt)}</p>
+            <p><strong>更新时间：</strong>{formatDateTime(selectedWorkOrder.updatedAt)}</p>
           </div>
           {#if selectedWorkOrder.note}
             <div class="status-info">
@@ -3257,7 +3329,7 @@
               {#if dbStats.migratedAt}
                 <div class="db-info-row">
                   <span>最近迁移</span>
-                  <strong>{formatTime(dbStats.migratedAt)}</strong>
+                  <strong>{formatDateTime(dbStats.migratedAt)}</strong>
                 </div>
               {/if}
               <div class="db-stats-grid">
@@ -3427,7 +3499,7 @@
               </div>
             {/if}
             {#if dbStats?.meta?.lastMergeAt}
-              <p class="hint" style="margin-top: 6px;">上次合并时间：{formatTime(dbStats.meta.lastMergeAt)} · 本设备ID：<code style="background:#f0e6d6;padding:1px 6px;border-radius:3px;font-size:12px;">{dbStats.meta.deviceId}</code></p>
+              <p class="hint" style="margin-top: 6px;">上次合并时间：{formatDateTime(dbStats.meta.lastMergeAt)} · 本设备ID：<code style="background:#f0e6d6;padding:1px 6px;border-radius:3px;font-size:12px;">{dbStats.meta.deviceId}</code></p>
             {:else if dbStats?.meta?.deviceId}
               <p class="hint" style="margin-top: 6px;">本设备ID：<code style="background:#f0e6d6;padding:1px 6px;border-radius:3px;font-size:12px;">{dbStats.meta.deviceId}</code></p>
             {/if}
@@ -3446,6 +3518,375 @@
                   <Trash2 size={16} />清除旧版数据
                 </button>
               </div>
+            </div>
+          {/if}
+
+          {#if dbStats}
+            <div class="data-manager-section">
+              <h3><Trash2 size={16} />软删除与墓碑管理</h3>
+              <p class="hint">删除的服装、演员、排期、工单、预约、装箱单会保留软删除标记和墓碑记录，可在此恢复或永久清除。合并时墓碑用于区分"真实删除"与"旧备份缺失"。</p>
+
+              {#if dbStats.tombstones && dbStats.tombstones.total > 0}
+                <div class="tombstone-stats-row">
+                  <span class="tombstone-stat">墓碑记录总数：<strong>{dbStats.tombstones.total}</strong></span>
+                  {#each Object.entries(dbStats.tombstones.byTable) as [table, count]}
+                    <span class="tombstone-stat-chip">{TABLE_LABELS[table] || table}：{count}</span>
+                  {/each}
+                </div>
+              {:else}
+                <p class="hint">暂无墓碑记录。</p>
+              {/if}
+
+              {#if dbStats.softDeleted}
+                <div class="soft-deleted-summary">
+                  {#each Object.entries(dbStats.softDeleted) as [table, count]}
+                    {#if count > 0}
+                      <span class="soft-deleted-chip">{TABLE_LABELS[table] || table}：{count} 条已删除</span>
+                    {/if}
+                  {/each}
+                </div>
+              {/if}
+
+              <div class="data-manager-actions" style="margin-top: 10px;">
+                <button type="button" class="secondary" on:click={() => showDeletedRecords = !showDeletedRecords}>
+                  {#if showDeletedRecords}<X size={14} />关闭详情{:else}<Eye size={14} />查看已删除记录{/if}
+                </button>
+                <button type="button" class="secondary" on:click={() => showTombstoneHistory = !showTombstoneHistory}>
+                  {#if showTombstoneHistory}<X size={14} />关闭墓碑{:else}<Database size={14} />查看墓碑历史{/if}
+                </button>
+              </div>
+
+              {#if showDeletedRecords}
+                <div class="deleted-records-panel">
+                  <div class="deleted-filter-row">
+                    {#each [...SOFT_DELETE_TABLES] as table}
+                      <button
+                        type="button"
+                        class="deleted-filter-tab {deletedRecordFilter === table ? 'active' : ''}"
+                        on:click={() => { deletedRecordFilter = table; }}
+                      >
+                        {TABLE_LABELS[table] || table}
+                        {#if dbStats.softDeleted?.[table]}
+                          <span class="deleted-count-badge">{dbStats.softDeleted[table]}</span>
+                        {/if}
+                      </button>
+                    {/each}
+                  </div>
+
+                  {#if currentDeletedRecords.length === 0}
+                    <div class="record-empty" style="padding: 20px;">
+                      <Trash2 size={24} />
+                      <p>{TABLE_LABELS[deletedRecordFilter] || deletedRecordFilter}暂无已删除记录</p>
+                    </div>
+                  {:else}
+                    <div class="data-manager-actions" style="margin-bottom: 10px;">
+                      <button type="button" class="danger-outline small-btn" on:click={() => handlePurgeAllDeleted(deletedRecordFilter)}>
+                        <Trash2 size={12} />永久清除全部 ({currentDeletedRecords.length})
+                      </button>
+                    </div>
+                    <div class="deleted-records-list">
+                      {#each currentDeletedRecords as rec}
+                        <div class="deleted-record-item">
+                          <div class="deleted-record-info">
+                            <strong>{getDeletedRecordTitle(deletedRecordFilter, rec)}</strong>
+                            <span class="deleted-record-meta">
+                              删除时间：{formatDateTime(rec.deletedAt)}
+                              {#if rec.deletedByDeviceId} · 设备：{rec.deletedByDeviceId}{/if}
+                              {#if rec.deleteSummary} · {rec.deleteSummary}{/if}
+                            </span>
+                          </div>
+                          <div class="deleted-record-actions">
+                            <button type="button" class="secondary small-btn" on:click={() => handleRestoreDeletedRecord(deletedRecordFilter, rec.id)}>
+                              <Undo2 size={12} />恢复
+                            </button>
+                            <button type="button" class="danger-outline small-btn" on:click={() => handlePurgeDeletedRecord(deletedRecordFilter, rec.id)}>
+                              <Trash2 size={12} />永久删除
+                            </button>
+                          </div>
+                        </div>
+                      {/each}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+
+              {#if showTombstoneHistory}
+                <div class="tombstone-history-panel">
+                  {#if allTombstones.length === 0}
+                    <div class="record-empty" style="padding: 20px;">
+                      <Database size={24} />
+                      <p>暂无墓碑记录</p>
+                    </div>
+                  {:else}
+                    <div class="tombstone-list">
+                      {#each allTombstones.slice(0, 50) as ts}
+                        <div class="tombstone-item">
+                          <div class="tombstone-info">
+                            <span class="tombstone-table-badge">{TABLE_LABELS[ts.table] || ts.table}</span>
+                            <strong>{ts.summary || ts.recordId?.slice(0, 8)}</strong>
+                            <span class="tombstone-meta">
+                              删除时间：{formatDateTime(ts.deletedAt)}
+                              {#if ts.deletedByDeviceId} · 设备：{ts.deletedByDeviceId}{/if}
+                            </span>
+                          </div>
+                        </div>
+                      {/each}
+                      {#if allTombstones.length > 50}
+                        <p class="hint" style="text-align:center; margin-top: 8px;">仅显示最近 50 条，共 {allTombstones.length} 条墓碑记录</p>
+                      {/if}
+                    </div>
+                  {/if}
+                </div>
+              {/if}
+            </div>
+          {/if}
+        </div>
+      </div>
+    </div>
+  {/if}
+
+  {#if showPerformancePanel}
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="modal-overlay" role="presentation" on:click={() => showPerformancePanel = false}>
+      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+      <div
+        class="modal modal-wide"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="performance-title"
+        on:click|stopPropagation
+        tabindex="-1"
+      >
+        <div class="modal-header">
+          <h2 id="performance-title"><Zap size={20} />性能测试中心</h2>
+          <button type="button" class="icon-btn" on:click={() => showPerformancePanel = false} aria-label="关闭"><X size={20} /></button>
+        </div>
+        <div class="data-manager-body">
+          <div class="data-manager-section">
+            <h3><Database size={16} />当前索引状态</h3>
+            <div class="db-stats-grid">
+              <div class="db-stat-card">
+                <div class="db-stat-num">{formatNumber(indexStats?.totalRecords)}</div>
+                <div class="db-stat-label">总记录数</div>
+              </div>
+              <div class="db-stat-card">
+                <div class="db-stat-num">{formatNumber(indexStats?.searchQueries)}</div>
+                <div class="db-stat-label">搜索查询数</div>
+              </div>
+              <div class="db-stat-card">
+                <div class="db-stat-num">{formatNumber(indexStats?.filterQueries)}</div>
+                <div class="db-stat-label">过滤查询数</div>
+              </div>
+              <div class="db-stat-card">
+                <div class="db-stat-num">{formatNumber(indexStats?.incrementalUpdates)}</div>
+                <div class="db-stat-label">增量更新</div>
+              </div>
+              <div class="db-stat-card">
+                <div class="db-stat-num">{formatNumber(indexStats?.cacheHits)}</div>
+                <div class="db-stat-label">缓存命中</div>
+              </div>
+              <div class="db-stat-card">
+                <div class="db-stat-num">{(indexStats?.cacheHitRate || 0).toFixed(1)}%</div>
+                <div class="db-stat-label">缓存命中率</div>
+              </div>
+            </div>
+          </div>
+
+          <div class="data-manager-section">
+            <h3><Activity size={16} />大样本数据生成</h3>
+            <p class="section-desc">生成模拟数据用于性能测试。数据量越大，测试效果越明显。</p>
+            <div class="config-grid">
+              <div class="config-item">
+                <label>服装档案数量</label>
+                <input type="number" bind:value={sampleDataConfig.costumeCount} min="0" max="10000" />
+              </div>
+              <div class="config-item">
+                <label>排期数量</label>
+                <input type="number" bind:value={sampleDataConfig.scheduleCount} min="0" max="5000" />
+              </div>
+              <div class="config-item">
+                <label>借还记录数量</label>
+                <input type="number" bind:value={sampleDataConfig.recordCount} min="0" max="20000" />
+              </div>
+              <div class="config-item">
+                <label>盘点明细数量</label>
+                <input type="number" bind:value={sampleDataConfig.inventoryItemCount} min="0" max="50000" />
+              </div>
+              <div class="config-item">
+                <label>装箱单数量</label>
+                <input type="number" bind:value={sampleDataConfig.packingListCount} min="0" max="5000" />
+              </div>
+              <div class="config-item">
+                <label>工单数量</label>
+                <input type="number" bind:value={sampleDataConfig.workOrderCount} min="0" max="10000" />
+              </div>
+              <div class="config-item">
+                <label>预约数量</label>
+                <input type="number" bind:value={sampleDataConfig.reservationCount} min="0" max="10000" />
+              </div>
+            </div>
+            <div class="btn-row">
+              <button type="button" class="btn btn-primary" on:click={handleGenerateSampleData} disabled={isGeneratingData}>
+                {#if isGeneratingData}<RefreshCw class="spin" size={16} />生成中...{:else}<Database size={16} />生成样本数据{/if}
+              </button>
+              <button type="button" class="btn" on:click={handleRunPerformanceTests} disabled={isRunningTests}>
+                {#if isRunningTests}<RefreshCw class="spin" size={16} />测试中...{:else}<Activity size={16} />运行性能测试{/if}
+              </button>
+              {#if performanceTestResults}
+                <button type="button" class="btn btn-secondary" on:click={clearPerformanceResults}>
+                  <X size={16} />清除结果
+                </button>
+              {/if}
+            </div>
+          </div>
+
+          {#if performanceTestResults}
+            <div class="data-manager-section">
+              <h3><CheckCircle size={16} />测试结果</h3>
+              {#if performanceTestResults.error}
+                <div class="alert alert-error">
+                  <AlertTriangle size={16} />
+                  <span>{performanceTestResults.error}</span>
+                </div>
+              {/if}
+
+              {#if performanceTestResults.dataGeneration}
+                <div class="result-section">
+                  <h4>数据生成</h4>
+                  <div class="result-grid">
+                    <div class="result-item">
+                      <span>生成耗时</span>
+                      <strong>{formatTime(performanceTestResults.dataGeneration.time)}</strong>
+                    </div>
+                    <div class="result-item">
+                      <span>总记录数</span>
+                      <strong>{formatNumber(performanceTestResults.dataGeneration.totalRecords)}</strong>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+
+              {#if performanceTestResults.search}
+                <div class="result-section">
+                  <h4>搜索性能</h4>
+                  <div class="result-grid">
+                    <div class="result-item">
+                      <span>单条搜索</span>
+                      <strong>{formatTime(performanceTestResults.search.single)}</strong>
+                    </div>
+                    <div class="result-item">
+                      <span>100次搜索</span>
+                      <strong>{formatTime(performanceTestResults.search.bulk)}</strong>
+                    </div>
+                    <div class="result-item">
+                      <span>平均耗时</span>
+                      <strong>{formatTime(performanceTestResults.search.average)}</strong>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+
+              {#if performanceTestResults.filter}
+                <div class="result-section">
+                  <h4>过滤性能</h4>
+                  <div class="result-grid">
+                    <div class="result-item">
+                      <span>剧目过滤</span>
+                      <strong>{formatTime(performanceTestResults.filter.byPlay)}</strong>
+                    </div>
+                    <div class="result-item">
+                      <span>状态过滤</span>
+                      <strong>{formatTime(performanceTestResults.filter.byStatus)}</strong>
+                    </div>
+                    <div class="result-item">
+                      <span>组合过滤</span>
+                      <strong>{formatTime(performanceTestResults.filter.combined)}</strong>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+
+              {#if performanceTestResults.risks}
+                <div class="result-section">
+                  <h4>风险计算性能</h4>
+                  <div class="result-grid">
+                    <div class="result-item">
+                      <span>全量风险计算</span>
+                      <strong>{formatTime(performanceTestResults.risks.fullCompute)}</strong>
+                    </div>
+                    <div class="result-item">
+                      <span>单日风险计算</span>
+                      <strong>{formatTime(performanceTestResults.risks.dailyCompute)}</strong>
+                    </div>
+                    <div class="result-item">
+                      <span>风险项数量</span>
+                      <strong>{formatNumber(performanceTestResults.risks.riskCount)}</strong>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+
+              {#if performanceTestResults.inventory}
+                <div class="result-section">
+                  <h4>盘点统计性能</h4>
+                  <div class="result-grid">
+                    <div class="result-item">
+                      <span>单任务统计</span>
+                      <strong>{formatTime(performanceTestResults.inventory.singleTask)}</strong>
+                    </div>
+                    <div class="result-item">
+                      <span>差异项查询</span>
+                      <strong>{formatTime(performanceTestResults.inventory.discrepancies)}</strong>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+
+              {#if performanceTestResults.relations}
+                <div class="result-section">
+                  <h4>关联查询性能</h4>
+                  <div class="result-grid">
+                    <div class="result-item">
+                      <span>服装关联排期</span>
+                      <strong>{formatTime(performanceTestResults.relations.costumeToSchedules)}</strong>
+                    </div>
+                    <div class="result-item">
+                      <span>服装关联工单</span>
+                      <strong>{formatTime(performanceTestResults.relations.costumeToWorkOrders)}</strong>
+                    </div>
+                    <div class="result-item">
+                      <span>排期关联服装</span>
+                      <strong>{formatTime(performanceTestResults.relations.scheduleToCostumes)}</strong>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+
+              {#if performanceTestResults.incremental}
+                <div class="result-section">
+                  <h4>增量更新性能</h4>
+                  <div class="result-grid">
+                    <div class="result-item">
+                      <span>单条记录更新</span>
+                      <strong>{formatTime(performanceTestResults.incremental.singleUpdate)}</strong>
+                    </div>
+                    <div class="result-item">
+                      <span>索引重建</span>
+                      <strong>{formatTime(performanceTestResults.incremental.fullRebuild)}</strong>
+                    </div>
+                  </div>
+                </div>
+              {/if}
+
+              {#if performanceTestResults.summary}
+                <div class="result-section">
+                  <h4>性能总结</h4>
+                  <div class="alert alert-info">
+                    <Activity size={16} />
+                    <span>{performanceTestResults.summary}</span>
+                  </div>
+                </div>
+              {/if}
             </div>
           {/if}
         </div>
@@ -4038,5 +4479,303 @@
     overflow: hidden;
     display: flex;
     flex-direction: column;
+  }
+
+  .tombstone-stats-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    align-items: center;
+    margin: 10px 0;
+  }
+  .tombstone-stat {
+    font-size: 13px;
+    color: #4a3a2a;
+  }
+  .tombstone-stat-chip {
+    padding: 2px 8px;
+    background: #f0e6d6;
+    border-radius: 10px;
+    font-size: 11px;
+    color: #6b5a4a;
+  }
+  .soft-deleted-summary {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin: 8px 0;
+  }
+  .soft-deleted-chip {
+    padding: 3px 10px;
+    background: #fdecea;
+    color: #8a2d2d;
+    border-radius: 12px;
+    font-size: 12px;
+  }
+  .deleted-records-panel {
+    margin-top: 12px;
+    border: 1px solid #e8dfd2;
+    border-radius: 6px;
+    background: #faf6f0;
+    padding: 12px;
+  }
+  .deleted-filter-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-bottom: 10px;
+  }
+  .deleted-filter-tab {
+    padding: 5px 10px;
+    border: 1px solid #d8c8ba;
+    background: #fff;
+    border-radius: 14px;
+    cursor: pointer;
+    font-size: 12px;
+    color: #4a3a2a;
+    font-family: inherit;
+    display: flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .deleted-filter-tab:hover { background: #f0e6d6; }
+  .deleted-filter-tab.active { background: #8a5b41; color: #fff; border-color: #8a5b41; }
+  .deleted-count-badge {
+    background: rgba(0,0,0,0.1);
+    padding: 0 5px;
+    border-radius: 8px;
+    font-size: 10px;
+  }
+  .deleted-filter-tab.active .deleted-count-badge { background: rgba(255,255,255,0.25); }
+  .deleted-records-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  .deleted-record-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 8px 10px;
+    background: #fff;
+    border: 1px solid #e8dfd2;
+    border-radius: 4px;
+    gap: 8px;
+  }
+  .deleted-record-info {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    min-width: 0;
+    flex: 1;
+  }
+  .deleted-record-info strong {
+    font-size: 13px;
+    color: #26211c;
+    display: block;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .deleted-record-meta {
+    font-size: 11px;
+    color: #8a7665;
+  }
+  .deleted-record-actions {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .tombstone-history-panel {
+    margin-top: 12px;
+    border: 1px solid #e8dfd2;
+    border-radius: 6px;
+    background: #faf6f0;
+    padding: 12px;
+  }
+  .tombstone-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 300px;
+    overflow-y: auto;
+  }
+  .tombstone-item {
+    padding: 8px 10px;
+    background: #fff;
+    border: 1px solid #e8dfd2;
+    border-radius: 4px;
+  }
+  .tombstone-info {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .tombstone-table-badge {
+    padding: 1px 8px;
+    background: #e6eef6;
+    color: #1a4a8a;
+    border-radius: 8px;
+    font-size: 11px;
+    font-weight: 500;
+  }
+  .tombstone-meta {
+    font-size: 11px;
+    color: #8a7665;
+  }
+
+  .config-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+    gap: 12px;
+    margin: 12px 0;
+  }
+  .config-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .config-item label {
+    font-size: 12px;
+    color: #6b5a4d;
+    font-weight: 500;
+  }
+  .config-item input {
+    padding: 8px 10px;
+    border: 1px solid #d4c5b5;
+    border-radius: 6px;
+    font-size: 14px;
+    background: #fff;
+  }
+  .config-item input:focus {
+    outline: none;
+    border-color: #8a5b41;
+    box-shadow: 0 0 0 2px rgba(138, 91, 65, 0.15);
+  }
+
+  .btn-row {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-top: 12px;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 16px;
+    border: 1px solid #d4c5b5;
+    border-radius: 6px;
+    background: #fff;
+    color: #26211c;
+    font-size: 14px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .btn:hover:not(:disabled) {
+    background: #faf6f2;
+    border-color: #8a5b41;
+  }
+  .btn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+  }
+  .btn-primary {
+    background: #8a5b41;
+    border-color: #8a5b41;
+    color: #fff;
+  }
+  .btn-primary:hover:not(:disabled) {
+    background: #6b4430;
+    border-color: #6b4430;
+    color: #fff;
+  }
+  .btn-secondary {
+    background: #f5f0ea;
+  }
+
+  .section-desc {
+    font-size: 13px;
+    color: #6b5a4d;
+    margin: 6px 0 0;
+  }
+
+  .result-section {
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #eadfd4;
+  }
+  .result-section:first-of-type {
+    margin-top: 12px;
+    padding-top: 0;
+    border-top: none;
+  }
+  .result-section h4 {
+    font-size: 14px;
+    font-weight: 600;
+    color: #603d2d;
+    margin: 0 0 10px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+  .result-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 8px;
+  }
+  .result-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 10px 12px;
+    background: #faf6f2;
+    border: 1px solid #e4d8cc;
+    border-radius: 6px;
+  }
+  .result-item span {
+    font-size: 12px;
+    color: #6b5a4d;
+  }
+  .result-item strong {
+    font-size: 14px;
+    font-weight: 600;
+    color: #603d2d;
+  }
+
+  .alert {
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    padding: 12px 14px;
+    border-radius: 6px;
+    margin: 10px 0;
+  }
+  .alert-error {
+    background: #fef2f0;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+  }
+  .alert-info {
+    background: #eff6ff;
+    border: 1px solid #bfdbfe;
+    color: #1e40af;
+  }
+  .alert span {
+    flex: 1;
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .spin {
+    animation: spin 1s linear infinite;
+  }
+  @keyframes spin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
   }
 </style>

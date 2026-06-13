@@ -1,5 +1,7 @@
+import globalIndex from '$lib/dataIndex.js';
+
 const DB_KEY = 'zfl-2-database';
-const DB_VERSION = 7;
+const DB_VERSION = 9;
 
 const TABLES = {
   costumes: 'costumes',
@@ -12,7 +14,8 @@ const TABLES = {
   inventoryTasks: 'inventoryTasks',
   inventoryItems: 'inventoryItems',
   riskStatuses: 'riskStatuses',
-  syncEvents: 'syncEvents'
+  syncEvents: 'syncEvents',
+  tombstones: 'tombstones'
 };
 
 const TABLE_LABELS = {
@@ -26,7 +29,26 @@ const TABLE_LABELS = {
   inventoryTasks: '盘点任务',
   inventoryItems: '盘点明细',
   riskStatuses: '风险处理状态',
-  syncEvents: '同步事件日志'
+  syncEvents: '同步事件日志',
+  tombstones: '删除墓碑记录'
+};
+
+const SOFT_DELETE_TABLES = new Set([
+  TABLES.costumes,
+  TABLES.actors,
+  TABLES.schedules,
+  TABLES.workOrders,
+  TABLES.reservations,
+  TABLES.packingLists
+]);
+
+const TOMBSTONE_SUMMARY_FIELDS = {
+  [TABLES.costumes]: ['name', 'play', 'size'],
+  [TABLES.actors]: ['name', 'role'],
+  [TABLES.schedules]: ['play', 'date', 'venue'],
+  [TABLES.workOrders]: ['type', 'costumeName', 'status'],
+  [TABLES.reservations]: ['costumeName', 'reservedFor'],
+  [TABLES.packingLists]: ['name', 'play']
 };
 
 export const EVENT_TYPES = {
@@ -103,7 +125,8 @@ function createEmptyDatabase() {
       [TABLES.inventoryTasks]: [],
       [TABLES.inventoryItems]: [],
       [TABLES.riskStatuses]: [],
-      [TABLES.syncEvents]: []
+      [TABLES.syncEvents]: [],
+      [TABLES.tombstones]: []
     }
   };
 }
@@ -259,13 +282,58 @@ function migrate_v6_to_v7(db) {
   return db;
 }
 
+function migrate_v7_to_v8(db) {
+  if (!db.tables[TABLES.tombstones]) {
+    db.tables[TABLES.tombstones] = [];
+  }
+  for (const table of SOFT_DELETE_TABLES) {
+    if (!Array.isArray(db.tables[table])) continue;
+    for (const record of db.tables[table]) {
+      if (record.deletedAt === undefined) {
+        record.deletedAt = null;
+        record.deletedByDeviceId = null;
+        record.deleteSummary = null;
+      }
+    }
+  }
+  return db;
+}
+
+function migrate_v8_to_v9(db) {
+  if (!db.tables[TABLES.tombstones]) {
+    db.tables[TABLES.tombstones] = [];
+  }
+  for (const table of SOFT_DELETE_TABLES) {
+    if (!Array.isArray(db.tables[table])) continue;
+    for (const record of db.tables[table]) {
+      if (record.deletedAt === undefined) record.deletedAt = null;
+      if (record.deletedByDeviceId === undefined) record.deletedByDeviceId = null;
+      if (record.deleteSummary === undefined) record.deleteSummary = null;
+    }
+  }
+  const tombstoneRecordIds = new Set(
+    (db.tables[TABLES.tombstones] || []).map((t) => `${t.table}|${t.recordId}`)
+  );
+  for (const table of SOFT_DELETE_TABLES) {
+    if (!Array.isArray(db.tables[table])) continue;
+    for (const record of db.tables[table]) {
+      if (record.deletedAt && !tombstoneRecordIds.has(`${table}|${record.id}`)) {
+        recordTombstone(db, table, record.id, record);
+      }
+    }
+  }
+  return db;
+}
+
 const MIGRATIONS = {
   1: migrate_v1_to_v2,
   2: migrate_v2_to_v3,
   3: migrate_v3_to_v4,
   4: migrate_v4_to_v5,
   5: migrate_v5_to_v6,
-  6: migrate_v6_to_v7
+  6: migrate_v6_to_v7,
+  7: migrate_v7_to_v8,
+  8: migrate_v8_to_v9
 };
 
 function runMigrations(db) {
@@ -290,6 +358,7 @@ function runMigrations(db) {
 }
 
 export function initializeDatabase() {
+  let db;
   const existing = readRawDB();
 
   if (existing && typeof existing === 'object' && existing.tables) {
@@ -299,26 +368,34 @@ export function initializeDatabase() {
         migrated.migratedAt = new Date().toISOString();
       }
       writeRawDB(migrated);
-      return migrated;
+      db = migrated;
     } catch (e) {
       console.error('[DB] Migration failed, preserving existing data:', e);
-      return existing;
+      db = existing;
     }
-  }
-
-  if (hasLegacyData()) {
+  } else if (hasLegacyData()) {
     try {
       const migrated = migrateFromLegacy();
       writeRawDB(migrated);
-      return migrated;
+      db = migrated;
     } catch (e) {
       console.error('[DB] Legacy migration failed, preserving legacy data:', e);
+      const fresh = createEmptyDatabase();
+      writeRawDB(fresh);
+      db = fresh;
     }
+  } else {
+    const fresh = createEmptyDatabase();
+    writeRawDB(fresh);
+    db = fresh;
   }
 
-  const fresh = createEmptyDatabase();
-  writeRawDB(fresh);
-  return fresh;
+  try {
+    globalIndex.build(db);
+  } catch (e) {
+    console.error('[DB] Index build failed:', e);
+  }
+  return db;
 }
 
 let _eventBatching = 0;
@@ -456,6 +533,81 @@ export function registerKnownDevice(db, deviceId) {
   return db._meta.knownDevices;
 }
 
+function buildRecordSummary(table, record) {
+  if (!record) return '';
+  const fields = TOMBSTONE_SUMMARY_FIELDS[table];
+  if (!fields) return record.id || '';
+  const parts = [];
+  for (const f of fields) {
+    const val = record[f];
+    if (val !== null && val !== undefined && val !== '') {
+      parts.push(String(val));
+    }
+  }
+  return parts.join(' · ') || record.id || '';
+}
+
+function recordTombstone(db, table, recordId, record) {
+  if (!SOFT_DELETE_TABLES.has(table)) return null;
+  if (!db.tables[TABLES.tombstones]) {
+    db.tables[TABLES.tombstones] = [];
+  }
+  const summary = buildRecordSummary(table, record);
+  const tombstone = {
+    id: crypto.randomUUID(),
+    table,
+    recordId,
+    deletedAt: new Date().toISOString(),
+    deletedByDeviceId: db._meta?.deviceId || null,
+    summary,
+    recordSnapshot: record ? deepClone(record) : null
+  };
+  db.tables[TABLES.tombstones].unshift(tombstone);
+  return tombstone;
+}
+
+function removeTombstone(db, table, recordId) {
+  if (!db.tables[TABLES.tombstones]) return false;
+  const beforeLen = db.tables[TABLES.tombstones].length;
+  db.tables[TABLES.tombstones] = db.tables[TABLES.tombstones].filter(
+    (t) => !(t.table === table && t.recordId === recordId)
+  );
+  return db.tables[TABLES.tombstones].length !== beforeLen;
+}
+
+export function getTombstones(table = null) {
+  const db = getDB();
+  const all = db.tables[TABLES.tombstones] || [];
+  if (table) {
+    return deepClone(all.filter((t) => t.table === table));
+  }
+  return deepClone(all);
+}
+
+export function findTombstone(table, recordId) {
+  const db = getDB();
+  const all = db.tables[TABLES.tombstones] || [];
+  const t = all.find((ts) => ts.table === table && ts.recordId === recordId);
+  return t ? deepClone(t) : null;
+}
+
+export function hasTombstone(db, table, recordId) {
+  if (!db.tables[TABLES.tombstones]) return false;
+  return db.tables[TABLES.tombstones].some(
+    (t) => t.table === table && t.recordId === recordId
+  );
+}
+
+function isSoftDeleted(record) {
+  return !!(record && record.deletedAt);
+}
+
+export function getDeletedRecords(table) {
+  const db = getDB();
+  if (!Array.isArray(db.tables[table])) return [];
+  return deepClone(db.tables[table].filter((r) => isSoftDeleted(r)));
+}
+
 export function getDB() {
   const db = readRawDB();
   if (db && typeof db === 'object' && db.tables) {
@@ -468,41 +620,88 @@ export function saveDB(db) {
   return writeRawDB(db);
 }
 
-export function getAll(table) {
+export function getAll(table, options = {}) {
   const db = getDB();
-  return deepClone(db.tables[table] || []);
+  let records = db.tables[table] || [];
+  if (SOFT_DELETE_TABLES.has(table) && !options.includeDeleted) {
+    records = records.filter((r) => !isSoftDeleted(r));
+  }
+  return deepClone(records);
 }
 
-export function setAll(table, data) {
+export function getAllIncludingDeleted(table) {
+  return getAll(table, { includeDeleted: true });
+}
+
+export function setAll(table, data, options = {}) {
   const db = getDB();
   const oldData = Array.isArray(db.tables[table]) ? deepClone(db.tables[table]) : [];
   const newData = Array.isArray(data) ? deepClone(data) : [];
   const now = new Date().toISOString();
-  for (const rec of newData) {
+  const isSoftDeleteTable = SOFT_DELETE_TABLES.has(table);
+  const newIds = new Set(newData.map((r) => r.id).filter(Boolean));
+  const finalRecords = [...newData];
+
+  const toAdd = [];
+  const toUpdate = [];
+  const toRemove = [];
+
+  for (const rec of finalRecords) {
     if (!rec.id) rec.id = crypto.randomUUID();
     if (!rec.createdAt) rec.createdAt = now;
     rec.updatedAt = now;
+    if (isSoftDeleteTable) {
+      if (rec.deletedAt === undefined) rec.deletedAt = null;
+      if (rec.deletedByDeviceId === undefined) rec.deletedByDeviceId = null;
+      if (rec.deleteSummary === undefined) rec.deleteSummary = null;
+    }
   }
-  db.tables[table] = newData;
+
   if (TRACKED_TABLES.has(table)) {
     const oldMap = new Map(oldData.map((r) => [r.id, r]));
-    const newMap = new Map(newData.map((r) => [r.id, r]));
+    const newMap = new Map(finalRecords.map((r) => [r.id, r]));
     const allIds = new Set([...oldMap.keys(), ...newMap.keys()]);
     for (const id of allIds) {
       const oldRec = oldMap.get(id);
       const newRec = newMap.get(id);
       if (oldRec && !newRec) {
-        recordSyncEvent(db, table, EVENT_TYPES.DELETE, id, {
-          before: oldRec,
-          after: null,
-          note: 'batch_delete'
-        });
+        if (isSoftDeleteTable && !isSoftDeleted(oldRec)) {
+          const summary = buildRecordSummary(table, oldRec);
+          const deletedRec = {
+            ...oldRec,
+            deletedAt: now,
+            deletedByDeviceId: db._meta?.deviceId || null,
+            deleteSummary: summary,
+            updatedAt: now
+          };
+          finalRecords.push(deletedRec);
+          recordTombstone(db, table, id, oldRec);
+          recordSyncEvent(db, table, EVENT_TYPES.DELETE, id, {
+            before: oldRec,
+            after: deletedRec,
+            note: 'batch_soft_delete'
+          });
+          if (!isSoftDeleted(deletedRec)) {
+            toRemove.push(deletedRec);
+          }
+        } else if (!isSoftDeleteTable) {
+          removeTombstone(db, table, id);
+          recordSyncEvent(db, table, EVENT_TYPES.DELETE, id, {
+            before: oldRec,
+            after: null,
+            note: 'batch_delete'
+          });
+          toRemove.push(oldRec);
+        }
       } else if (!oldRec && newRec) {
         recordSyncEvent(db, table, EVENT_TYPES.CREATE, id, {
           before: null,
           after: newRec,
           note: 'batch_create'
         });
+        if (!isSoftDeleted(newRec)) {
+          toAdd.push(newRec);
+        }
       } else if (oldRec && newRec) {
         const changedFields = getChangedFields(oldRec, newRec);
         if (changedFields) {
@@ -512,11 +711,55 @@ export function setAll(table, data) {
             changedFields,
             note: 'batch_update'
           });
+          if (!isSoftDeleted(newRec)) {
+            if (isSoftDeleted(oldRec)) {
+              toAdd.push(newRec);
+            } else {
+              toUpdate.push({ oldRecord: oldRec, newRecord: newRec });
+            }
+          } else if (!isSoftDeleted(oldRec)) {
+            toRemove.push(oldRec);
+          }
         }
       }
     }
   }
+
+  db.tables[table] = finalRecords;
   saveDB(db);
+
+  if (!options.skipIndex) {
+    const totalChanges = toAdd.length + toUpdate.length + toRemove.length;
+    if (totalChanges === 0) {
+    } else if (totalChanges < oldData.length * 0.5 && !options.forceRebuild) {
+      startEventBatch();
+      try {
+        globalIndex.startBatch();
+        try {
+          if (toAdd.length > 0) {
+            globalIndex.bulkAddRecords(table, toAdd);
+          }
+          if (toUpdate.length > 0) {
+            globalIndex.bulkUpdateRecords(table, toUpdate);
+          }
+          if (toRemove.length > 0) {
+            globalIndex.bulkRemoveRecords(table, toRemove);
+          }
+        } finally {
+          globalIndex.endBatch();
+        }
+      } finally {
+        endEventBatch();
+      }
+    } else {
+      try {
+        globalIndex.build(db);
+      } catch (e) {
+        console.error(`[DB] Index rebuild failed after setAll:`, e);
+      }
+    }
+  }
+
   return db.tables[table];
 }
 
@@ -540,7 +783,74 @@ export function insertOne(table, record) {
     });
   }
   saveDB(db);
+  try {
+    globalIndex.addRecord(table, newRecord);
+  } catch (e) {
+    console.error(`[DB] Index add failed for ${table}:`, e);
+  }
   return newRecord;
+}
+
+export function insertMany(table, records, options = {}) {
+  if (!records || records.length === 0) return [];
+
+  const db = getDB();
+  if (!Array.isArray(db.tables[table])) {
+    db.tables[table] = [];
+  }
+
+  const now = new Date().toISOString();
+  const isSoftDeleteTable = SOFT_DELETE_TABLES.has(table);
+  const savedRecords = [];
+  const indexRecords = [];
+
+  startEventBatch();
+  try {
+    globalIndex.startBatch();
+    try {
+      for (const record of records) {
+        const newRecord = deepClone(record);
+        if (!newRecord.id) {
+          newRecord.id = crypto.randomUUID();
+        }
+        if (!newRecord.createdAt) newRecord.createdAt = now;
+        if (!newRecord.updatedAt) newRecord.updatedAt = now;
+        if (isSoftDeleteTable) {
+          if (newRecord.deletedAt === undefined) newRecord.deletedAt = null;
+          if (newRecord.deletedByDeviceId === undefined) newRecord.deletedByDeviceId = null;
+          if (newRecord.deleteSummary === undefined) newRecord.deleteSummary = null;
+        }
+
+        db.tables[table].unshift(newRecord);
+        savedRecords.push(newRecord);
+        indexRecords.push(newRecord);
+
+        if (TRACKED_TABLES.has(table)) {
+          recordSyncEvent(db, table, EVENT_TYPES.CREATE, newRecord.id, {
+            before: null,
+            after: deepClone(newRecord),
+            note: options.batchNote || 'batch_insert'
+          });
+        }
+      }
+
+      saveDB(db);
+
+      if (indexRecords.length > 0) {
+        try {
+          globalIndex.bulkAddRecords(table, indexRecords);
+        } catch (e) {
+          console.error(`[DB] Bulk index add failed for ${table}:`, e);
+        }
+      }
+    } finally {
+      globalIndex.endBatch();
+    }
+  } finally {
+    endEventBatch();
+  }
+
+  return savedRecords;
 }
 
 export function updateOne(table, id, updates) {
@@ -562,6 +872,17 @@ export function updateOne(table, id, updates) {
     }
   }
   saveDB(db);
+  try {
+    if (isSoftDeleted(after) && !isSoftDeleted(before)) {
+      globalIndex.removeRecord(table, after);
+    } else if (!isSoftDeleted(after) && isSoftDeleted(before)) {
+      globalIndex.addRecord(table, after);
+    } else if (!isSoftDeleted(after)) {
+      globalIndex.updateRecord(table, before, after);
+    }
+  } catch (e) {
+    console.error(`[DB] Index update failed for ${table}:`, e);
+  }
   return db.tables[table][idx];
 }
 
@@ -585,10 +906,115 @@ export function updateOneWithEventType(table, id, updates, eventType, note = nul
     }
   }
   saveDB(db);
+  try {
+    if (isSoftDeleted(after) && !isSoftDeleted(before)) {
+      globalIndex.removeRecord(table, after);
+    } else if (!isSoftDeleted(after) && isSoftDeleted(before)) {
+      globalIndex.addRecord(table, after);
+    } else if (!isSoftDeleted(after)) {
+      globalIndex.updateRecord(table, before, after);
+    }
+  } catch (e) {
+    console.error(`[DB] Index update failed for ${table}:`, e);
+  }
   return db.tables[table][idx];
 }
 
-export function deleteOne(table, id) {
+export function updateMany(table, updatesArray, options = {}) {
+  if (!updatesArray || updatesArray.length === 0) return [];
+
+  const db = getDB();
+  if (!Array.isArray(db.tables[table])) return [];
+
+  const now = new Date().toISOString();
+  const results = [];
+  const indexUpdates = [];
+
+  startEventBatch();
+  try {
+    globalIndex.startBatch();
+    try {
+      for (const { id, updates, eventType, note } of updatesArray) {
+        const idx = db.tables[table].findIndex((r) => r.id === id);
+        if (idx === -1) continue;
+
+        const before = deepClone(db.tables[table][idx]);
+        db.tables[table][idx] = { ...db.tables[table][idx], ...deepClone(updates), updatedAt: now };
+        const after = db.tables[table][idx];
+
+        results.push(after);
+        indexUpdates.push({ oldRecord: before, newRecord: after });
+
+        if (TRACKED_TABLES.has(table)) {
+          const changedFields = getChangedFields(before, after);
+          if (changedFields || eventType) {
+            recordSyncEvent(db, table, eventType || EVENT_TYPES.UPDATE, id, {
+              before,
+              after: deepClone(after),
+              changedFields,
+              note: note || options.batchNote || 'batch_update'
+            });
+          }
+        }
+      }
+
+      saveDB(db);
+
+      if (indexUpdates.length > 0) {
+        try {
+          globalIndex.bulkUpdateRecords(table, indexUpdates);
+        } catch (e) {
+          console.error(`[DB] Bulk index update failed for ${table}:`, e);
+        }
+      }
+    } finally {
+      globalIndex.endBatch();
+    }
+  } finally {
+    endEventBatch();
+  }
+
+  return results;
+}
+
+export function softDeleteOne(table, id) {
+  if (!SOFT_DELETE_TABLES.has(table)) {
+    return purgeOne(table, id);
+  }
+  const db = getDB();
+  if (!Array.isArray(db.tables[table])) return false;
+  const idx = db.tables[table].findIndex((r) => r.id === id);
+  if (idx === -1) return false;
+  const before = deepClone(db.tables[table][idx]);
+  if (isSoftDeleted(before)) return false;
+  const now = new Date().toISOString();
+  const summary = buildRecordSummary(table, before);
+  db.tables[table][idx] = {
+    ...db.tables[table][idx],
+    deletedAt: now,
+    deletedByDeviceId: db._meta?.deviceId || null,
+    deleteSummary: summary,
+    updatedAt: now
+  };
+  const after = deepClone(db.tables[table][idx]);
+  recordTombstone(db, table, id, before);
+  if (TRACKED_TABLES.has(table)) {
+    recordSyncEvent(db, table, EVENT_TYPES.DELETE, id, {
+      before,
+      after,
+      note: 'soft_delete'
+    });
+  }
+  saveDB(db);
+  try {
+    globalIndex.removeRecord(table, after);
+  } catch (e) {
+    console.error(`[DB] Index remove failed for ${table}:`, e);
+  }
+  return true;
+}
+
+export function purgeOne(table, id) {
   const db = getDB();
   if (!Array.isArray(db.tables[table])) return false;
   const before = db.tables[table].find((r) => r.id === id);
@@ -596,23 +1022,228 @@ export function deleteOne(table, id) {
   const beforeLen = db.tables[table].length;
   db.tables[table] = db.tables[table].filter((r) => r.id !== id);
   if (db.tables[table].length !== beforeLen) {
+    removeTombstone(db, table, id);
     if (TRACKED_TABLES.has(table) && beforeClone) {
       recordSyncEvent(db, table, EVENT_TYPES.DELETE, id, {
         before: beforeClone,
-        after: null
+        after: null,
+        note: 'purge'
       });
     }
     saveDB(db);
+    try {
+      if (beforeClone && !isSoftDeleted(beforeClone)) {
+        globalIndex.removeRecord(table, beforeClone);
+      }
+    } catch (e) {
+      console.error(`[DB] Index remove failed for ${table}:`, e);
+    }
     return true;
   }
   return false;
 }
 
-export function findOne(table, id) {
+export function restoreOne(table, id) {
+  if (!SOFT_DELETE_TABLES.has(table)) return null;
+  const db = getDB();
+  if (!Array.isArray(db.tables[table])) return null;
+  const idx = db.tables[table].findIndex((r) => r.id === id);
+  if (idx === -1) return null;
+  const record = db.tables[table][idx];
+  if (!isSoftDeleted(record)) return null;
+  const before = deepClone(record);
+  db.tables[table][idx] = {
+    ...record,
+    deletedAt: null,
+    deletedByDeviceId: null,
+    deleteSummary: null,
+    updatedAt: new Date().toISOString()
+  };
+  const after = deepClone(db.tables[table][idx]);
+  removeTombstone(db, table, id);
+  if (TRACKED_TABLES.has(table)) {
+    recordSyncEvent(db, table, EVENT_TYPES.CREATE, id, {
+      before,
+      after,
+      note: 'restore'
+    });
+  }
+  saveDB(db);
+  try {
+    globalIndex.addRecord(table, after);
+  } catch (e) {
+    console.error(`[DB] Index add failed for ${table}:`, e);
+  }
+  return after;
+}
+
+export function deleteOne(table, id) {
+  return softDeleteOne(table, id);
+}
+
+export function cleanupReferencesForCostume(costumeId) {
+  const db = getDB();
+  const now = new Date().toISOString();
+  const deviceId = db._meta?.deviceId || null;
+  let affectedCount = 0;
+
+  const reservationRefs = [
+    { table: TABLES.reservations, field: 'costumeId' },
+    { table: TABLES.workOrders, field: 'costumeId' },
+    { table: TABLES.records, field: 'costumeId' },
+    { table: TABLES.inventoryItems, field: 'costumeId' }
+  ];
+
+  for (const ref of reservationRefs) {
+    if (!Array.isArray(db.tables[ref.table])) continue;
+    for (let i = 0; i < db.tables[ref.table].length; i++) {
+      const rec = db.tables[ref.table][i];
+      if (rec[ref.field] === costumeId && !isSoftDeleted(rec)) {
+        if (SOFT_DELETE_TABLES.has(ref.table)) {
+          db.tables[ref.table][i] = {
+            ...rec,
+            deletedAt: now,
+            deletedByDeviceId: deviceId,
+            deleteSummary: `关联服装已删除，自动清理`,
+            updatedAt: now
+          };
+          recordTombstone(db, ref.table, rec.id, rec);
+          recordSyncEvent(db, ref.table, EVENT_TYPES.DELETE, rec.id, {
+            before: deepClone(rec),
+            after: deepClone(db.tables[ref.table][i]),
+            note: 'cascade_soft_delete'
+          });
+        } else {
+          db.tables[ref.table][i] = {
+            ...rec,
+            [ref.field + '_dangling_note']: '原引用服装已删除',
+            updatedAt: now
+          };
+          recordSyncEvent(db, ref.table, EVENT_TYPES.UPDATE, rec.id, {
+            before: deepClone(rec),
+            after: deepClone(db.tables[ref.table][i]),
+            changedFields: [ref.field + '_dangling_note'],
+            note: 'dangling_ref_cleanup'
+          });
+        }
+        affectedCount++;
+      }
+    }
+  }
+
+  if (Array.isArray(db.tables[TABLES.packingLists])) {
+    for (let i = 0; i < db.tables[TABLES.packingLists].length; i++) {
+      const pl = db.tables[TABLES.packingLists][i];
+      if (!isSoftDeleted(pl) && Array.isArray(pl.items)) {
+        let modified = false;
+        const newItems = pl.items.map((item) => {
+          if (item.costumeId === costumeId) {
+            modified = true;
+            affectedCount++;
+            return { ...item, costumeId: null, _dangling_note: '原引用服装已删除' };
+          }
+          return item;
+        });
+        if (modified) {
+          const before = deepClone(pl);
+          db.tables[TABLES.packingLists][i] = { ...pl, items: newItems, updatedAt: now };
+          const after = deepClone(db.tables[TABLES.packingLists][i]);
+          recordSyncEvent(db, TABLES.packingLists, EVENT_TYPES.UPDATE, pl.id, {
+            before,
+            after,
+            changedFields: ['items'],
+            note: 'dangling_ref_cleanup_packing'
+          });
+        }
+      }
+    }
+  }
+
+  if (Array.isArray(db.tables[TABLES.schedules])) {
+    for (let i = 0; i < db.tables[TABLES.schedules].length; i++) {
+      const sched = db.tables[TABLES.schedules][i];
+      if (!isSoftDeleted(sched) && Array.isArray(sched.linkedCostumeIds)) {
+        const idx = sched.linkedCostumeIds.indexOf(costumeId);
+        if (idx !== -1) {
+          const before = deepClone(sched);
+          const newIds = sched.linkedCostumeIds.filter((id) => id !== costumeId);
+          db.tables[TABLES.schedules][i] = { ...sched, linkedCostumeIds: newIds, updatedAt: now };
+          const after = deepClone(db.tables[TABLES.schedules][i]);
+          recordSyncEvent(db, TABLES.schedules, EVENT_TYPES.UPDATE, sched.id, {
+            before,
+            after,
+            changedFields: ['linkedCostumeIds'],
+            note: 'dangling_ref_cleanup_schedule'
+          });
+          affectedCount++;
+        }
+      }
+    }
+  }
+
+  saveDB(db);
+  try {
+    globalIndex.build(db);
+  } catch (e) {
+    console.error('[DB] Index rebuild failed after cleanupReferences:', e);
+  }
+  return affectedCount;
+}
+
+export function getReferencesForCostume(costumeId) {
+  const db = getDB();
+  const refs = [];
+
+  if (Array.isArray(db.tables[TABLES.reservations])) {
+    for (const r of db.tables[TABLES.reservations]) {
+      if (r.costumeId === costumeId && !isSoftDeleted(r)) {
+        refs.push({ table: TABLES.reservations, id: r.id, label: `预约：${r.reservedFor}（${r.date}）` });
+      }
+    }
+  }
+  if (Array.isArray(db.tables[TABLES.workOrders])) {
+    for (const wo of db.tables[TABLES.workOrders]) {
+      if (wo.costumeId === costumeId && !isSoftDeleted(wo)) {
+        refs.push({ table: TABLES.workOrders, id: wo.id, label: `工单：${wo.type} - ${wo.assignee}` });
+      }
+    }
+  }
+  if (Array.isArray(db.tables[TABLES.packingLists])) {
+    for (const pl of db.tables[TABLES.packingLists]) {
+      if (!isSoftDeleted(pl) && Array.isArray(pl.items)) {
+        for (const item of pl.items) {
+          if (item.costumeId === costumeId) {
+            refs.push({ table: TABLES.packingLists, id: pl.id, label: `装箱单：${pl.name}` });
+            break;
+          }
+        }
+      }
+    }
+  }
+  if (Array.isArray(db.tables[TABLES.schedules])) {
+    for (const s of db.tables[TABLES.schedules]) {
+      if (!isSoftDeleted(s) && Array.isArray(s.linkedCostumeIds) && s.linkedCostumeIds.includes(costumeId)) {
+        refs.push({ table: TABLES.schedules, id: s.id, label: `排期：${s.play}（${s.date}）` });
+      }
+    }
+  }
+
+  return refs;
+}
+
+export function findOne(table, id, options = {}) {
   const db = getDB();
   if (!Array.isArray(db.tables[table])) return null;
   const record = db.tables[table].find((r) => r.id === id);
-  return record ? deepClone(record) : null;
+  if (!record) return null;
+  if (SOFT_DELETE_TABLES.has(table) && !options.includeDeleted && isSoftDeleted(record)) {
+    return null;
+  }
+  return deepClone(record);
+}
+
+export function findOneIncludingDeleted(table, id) {
+  return findOne(table, id, { includeDeleted: true });
 }
 
 export function exportFullDatabase(options = {}) {
@@ -688,6 +1319,11 @@ export function importFullDatabase(jsonString) {
     const migrated = runMigrations(cleaned);
     migrated.migratedAt = new Date().toISOString();
     writeRawDB(migrated);
+    try {
+      globalIndex.build(migrated);
+    } catch (idxErr) {
+      console.error('[DB] Index build failed after import:', idxErr);
+    }
     return { ok: true, db: migrated };
   } catch (e) {
     return { ok: false, error: `数据迁移失败：${e.message}` };
@@ -725,8 +1361,19 @@ export function readBackupFile(file) {
 export function getDBStats() {
   const db = getDB();
   const stats = {};
+  const deletedStats = {};
   for (const table of Object.values(TABLES)) {
-    stats[table] = (db.tables[table] || []).length;
+    const records = db.tables[table] || [];
+    stats[table] = records.length;
+    if (SOFT_DELETE_TABLES.has(table)) {
+      deletedStats[table] = records.filter((r) => isSoftDeleted(r)).length;
+    }
+  }
+
+  const tombstones = db.tables[TABLES.tombstones] || [];
+  const tombstoneByTable = {};
+  for (const t of tombstones) {
+    tombstoneByTable[t.table] = (tombstoneByTable[t.table] || 0) + 1;
   }
 
   const riskStatuses = db.tables[TABLES.riskStatuses] || [];
@@ -751,6 +1398,11 @@ export function getDBStats() {
     migratedAt: db.migratedAt,
     meta: db._meta || null,
     tables: stats,
+    softDeleted: deletedStats,
+    tombstones: {
+      total: tombstones.length,
+      byTable: tombstoneByTable
+    },
     riskStatuses: {
       total: riskStatuses.length,
       byStatus: riskStatusBreakdown
@@ -855,4 +1507,4 @@ export function parseBackupFile(jsonString) {
   }
 }
 
-export { TABLES, TABLE_LABELS, DB_VERSION, DB_KEY };
+export { TABLES, TABLE_LABELS, DB_VERSION, DB_KEY, SOFT_DELETE_TABLES };

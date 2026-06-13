@@ -23,8 +23,9 @@
     TASK_STATUS,
     formatTime
   } from '$lib/inventoryStore.js';
+  import { globalIndex } from '$lib/dataIndex.js';
 
-  export let costumes = [];
+  const costumes = [];
 
   let tasks = [];
   let query = '';
@@ -33,7 +34,7 @@
   let createForm = { name: '', note: '', playFilter: '全部剧目' };
   let showDeleteConfirmId = null;
 
-  $: plays = ['全部剧目', ...new Set(costumes.map((c) => c.play).filter(Boolean))];
+  $: plays = ['全部剧目', ...globalIndex.getUniqueCostumePlaysSorted()];
 
   function refreshTasks() {
     tasks = getAllInventoryTasks();
@@ -43,17 +44,13 @@
     refreshTasks();
   });
 
-  $: filteredTasks = tasks.filter((task) => {
-    const text = `${task.name}${task.playFilter}`;
-    const matchesQuery = text.includes(query.trim());
-    let matchesStatus = true;
-    if (statusFilter === '进行中') matchesStatus = task.status === TASK_STATUS.IN_PROGRESS;
-    else if (statusFilter === '已完成') matchesStatus = task.status === TASK_STATUS.COMPLETED;
-    return matchesQuery && matchesStatus;
-  }).sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  $: filteredTasks = globalIndex.filterInventoryTasks({
+    query,
+    statusFilter
+  });
 
-  $: inProgressCount = tasks.filter((t) => t.status === TASK_STATUS.IN_PROGRESS).length;
-  $: completedCount = tasks.filter((t) => t.status === TASK_STATUS.COMPLETED).length;
+  $: inProgressCount = globalIndex.getInventoryTasksByStatus(TASK_STATUS.IN_PROGRESS).length;
+  $: completedCount = globalIndex.getInventoryTasksByStatus(TASK_STATUS.COMPLETED).length;
 
   function openCreateModal() {
     createForm = { name: '', note: '', playFilter: '全部剧目' };

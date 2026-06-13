@@ -1,10 +1,12 @@
-import { TABLES, EVENT_TYPES, EVENT_TYPE_LABELS, getDeviceEventTimelines } from '$lib/database.js';
+import { TABLES, EVENT_TYPES, EVENT_TYPE_LABELS, getDeviceEventTimelines, hasTombstone, SOFT_DELETE_TABLES } from '$lib/database.js';
 
 export const DIFF_TYPES = {
   ADDED: 'added',
   IDENTICAL: 'identical',
   FIELD_CONFLICT: 'field_conflict',
   DELETED_SUSPECT: 'deleted_suspect',
+  TRUE_DELETE: 'true_delete',
+  OLD_BACKUP_MISSING: 'old_backup_missing',
   MODIFIED_ONLY_IN_CURRENT: 'modified_only_in_current',
   MODIFIED_ONLY_IN_IMPORT: 'modified_only_in_import',
   EVENT_BASED_RESOLVABLE: 'event_based_resolvable'
@@ -15,6 +17,8 @@ export const DIFF_LABELS = {
   [DIFF_TYPES.IDENTICAL]: '完全相同',
   [DIFF_TYPES.FIELD_CONFLICT]: '字段冲突（双方都修改了不同字段）',
   [DIFF_TYPES.DELETED_SUSPECT]: '疑似删除（当前有，导入中没有）',
+  [DIFF_TYPES.TRUE_DELETE]: '真实删除（导入侧有墓碑，已确认删除）',
+  [DIFF_TYPES.OLD_BACKUP_MISSING]: '旧备份缺失（导入侧无墓碑，可能是旧备份）',
   [DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT]: '仅当前侧有修改',
   [DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]: '仅导入侧有修改',
   [DIFF_TYPES.EVENT_BASED_RESOLVABLE]: '基于事件时间线可自动判断'
@@ -169,7 +173,7 @@ function analyzeTimelineForRecord(timelineByRecord, table, recordId) {
 }
 
 export function diffTable(currentRecords, importRecords, options = {}) {
-  const { timelineByRecord, table } = options;
+  const { timelineByRecord, table, currentDB, importDB } = options;
   const currentIdx = buildIndex(currentRecords);
   const importIdx = buildIndex(importRecords);
   const allIds = new Set([...currentIdx.keys(), ...importIdx.keys()]);
@@ -179,10 +183,14 @@ export function diffTable(currentRecords, importRecords, options = {}) {
     [DIFF_TYPES.IDENTICAL]: [],
     [DIFF_TYPES.FIELD_CONFLICT]: [],
     [DIFF_TYPES.DELETED_SUSPECT]: [],
+    [DIFF_TYPES.TRUE_DELETE]: [],
+    [DIFF_TYPES.OLD_BACKUP_MISSING]: [],
     [DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT]: [],
     [DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]: [],
     [DIFF_TYPES.EVENT_BASED_RESOLVABLE]: []
   };
+
+  const isSoftDeleteTable = SOFT_DELETE_TABLES.has(table);
 
   for (const id of allIds) {
     const cur = currentIdx.get(id);
@@ -190,12 +198,25 @@ export function diffTable(currentRecords, importRecords, options = {}) {
     const timelineAnalysis = analyzeTimelineForRecord(timelineByRecord, table, id);
 
     if (cur && !imp) {
-      result[DIFF_TYPES.DELETED_SUSPECT].push({
+      let deleteType = DIFF_TYPES.DELETED_SUSPECT;
+      let tombstoneInfo = null;
+      if (isSoftDeleteTable && importDB && currentDB) {
+        const importHasTombstone = hasTombstone(importDB, table, id);
+        const currentHasTombstone = hasTombstone(currentDB, table, id);
+        tombstoneInfo = { importHasTombstone, currentHasTombstone };
+        if (importHasTombstone) {
+          deleteType = DIFF_TYPES.TRUE_DELETE;
+        } else if (!currentHasTombstone) {
+          deleteType = DIFF_TYPES.OLD_BACKUP_MISSING;
+        }
+      }
+      result[deleteType].push({
         id,
         current: deepClone(cur),
         imported: null,
         fieldConflicts: [],
-        timelineAnalysis
+        timelineAnalysis,
+        tombstoneInfo
       });
     } else if (!cur && imp) {
       result[DIFF_TYPES.ADDED].push({
@@ -376,7 +397,9 @@ export function computeFullDiff(currentDB, importDB) {
   for (const table of MERGE_TABLES) {
     const tableDiff = diffTable(currentDB.tables[table] || [], importDB.tables[table] || [], {
       timelineByRecord: timeline.byRecord,
-      table
+      table,
+      currentDB,
+      importDB
     });
     diff[table] = tableDiff;
     summary[table] = {
@@ -384,6 +407,8 @@ export function computeFullDiff(currentDB, importDB) {
       [DIFF_TYPES.IDENTICAL]: tableDiff[DIFF_TYPES.IDENTICAL].length,
       [DIFF_TYPES.FIELD_CONFLICT]: tableDiff[DIFF_TYPES.FIELD_CONFLICT].length,
       [DIFF_TYPES.DELETED_SUSPECT]: tableDiff[DIFF_TYPES.DELETED_SUSPECT].length,
+      [DIFF_TYPES.TRUE_DELETE]: tableDiff[DIFF_TYPES.TRUE_DELETE].length,
+      [DIFF_TYPES.OLD_BACKUP_MISSING]: tableDiff[DIFF_TYPES.OLD_BACKUP_MISSING].length,
       [DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT]: tableDiff[DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT].length,
       [DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]: tableDiff[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT].length,
       [DIFF_TYPES.EVENT_BASED_RESOLVABLE]: tableDiff[DIFF_TYPES.EVENT_BASED_RESOLVABLE].length
@@ -516,6 +541,22 @@ export function createDefaultDecisions(diffResult) {
         choice,
         mergedData: deepClone(item.current),
         autoReason: item.timelineAnalysis?.autoReason || ''
+      };
+    }
+    for (const item of td[DIFF_TYPES.TRUE_DELETE]) {
+      decisions[table][item.id] = {
+        choice: DECISION_CHOICES.USE_IMPORT,
+        mergedData: null,
+        autoReason: item.tombstoneInfo?.importHasTombstone
+          ? '导入侧有墓碑记录，确认为真实删除'
+          : '确认为真实删除'
+      };
+    }
+    for (const item of td[DIFF_TYPES.OLD_BACKUP_MISSING]) {
+      decisions[table][item.id] = {
+        choice: DECISION_CHOICES.KEEP_CURRENT,
+        mergedData: deepClone(item.current),
+        autoReason: '两侧均无墓碑记录，导入侧可能为旧备份，保留当前版本'
       };
     }
   }
@@ -705,7 +746,9 @@ export function applyMerge(currentDB, importDB, diffResult, decisions) {
       ...td[DIFF_TYPES.EVENT_BASED_RESOLVABLE],
       ...td[DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT],
       ...td[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT],
-      ...td[DIFF_TYPES.DELETED_SUSPECT]
+      ...td[DIFF_TYPES.DELETED_SUSPECT],
+      ...td[DIFF_TYPES.TRUE_DELETE],
+      ...td[DIFF_TYPES.OLD_BACKUP_MISSING]
     ];
 
     for (const item of allItems) {
@@ -718,8 +761,21 @@ export function applyMerge(currentDB, importDB, diffResult, decisions) {
         item.current !== null &&
         item.imported === null
       ) {
-        skippedExistingIds[item.id] = true;
-        deletedCostumeIds.add(item.id);
+        const isTrueDelete = diffResult.tables[table]?.[DIFF_TYPES.TRUE_DELETE]?.some((td) => td.id === item.id);
+        if (isTrueDelete) {
+          const softDeleted = {
+            ...deepClone(item.current),
+            deletedAt: new Date().toISOString(),
+            deletedByDeviceId: importDB._meta?.deviceId || null,
+            deleteSummary: `合并时确认删除（导入侧有墓碑）`,
+            updatedAt: new Date().toISOString()
+          };
+          finalRecords.push(softDeleted);
+          keepIds.add(softDeleted.id);
+        } else {
+          skippedExistingIds[item.id] = true;
+          deletedCostumeIds.add(item.id);
+        }
         continue;
       }
 
@@ -793,6 +849,20 @@ export function applyMerge(currentDB, importDB, diffResult, decisions) {
       );
     }
   }
+
+  const currentTombstoneKeys = new Set(
+    (merged.tables[TABLES.tombstones] || []).map((t) => `${t.table}|${t.recordId}`)
+  );
+  const importTombstones = importDB.tables[TABLES.tombstones] || [];
+  const mergedTombstones = [...(merged.tables[TABLES.tombstones] || [])];
+  for (const ts of importTombstones) {
+    const key = `${ts.table}|${ts.recordId}`;
+    if (!currentTombstoneKeys.has(key)) {
+      mergedTombstones.push(deepClone(ts));
+      currentTombstoneKeys.add(key);
+    }
+  }
+  merged.tables[TABLES.tombstones] = mergedTombstones;
 
   return { db: merged, costumeIdMap };
 }

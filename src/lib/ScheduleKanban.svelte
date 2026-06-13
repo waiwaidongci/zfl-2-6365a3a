@@ -20,13 +20,14 @@
     compute30DayRisks,
     getRiskStats
   } from '$lib/scheduleStore.js';
+  import { globalIndex } from '$lib/dataIndex.js';
 
   export let schedules = [];
-  export let costumes = [];
-  export let reservations = [];
-  export let workOrders = [];
-  export let packingLists = [];
-  export let actors = [];
+  const costumes = [];
+  const reservations = [];
+  const workOrders = [];
+  const packingLists = [];
+  const actors = [];
 
   const dispatch = createEventDispatcher();
 
@@ -76,19 +77,13 @@
   }
 
   $: plays = ['全部剧目', ...new Set([
-    ...schedules.map((s) => s.play).filter(Boolean),
-    ...costumes.map((c) => c.play).filter(Boolean)
+    ...globalIndex.getUniquePlays(),
+    ...globalIndex.getUniqueCostumePlays()
   ])];
 
-  $: filteredSchedules = schedules.filter((s) => {
-    const text = `${s.play}${s.date}${s.time}${s.venue}${s.note}`;
-    const matchesQuery = text.includes(scheduleQuery.trim());
-    const matchesPlay = playFilter === '全部剧目' || s.play === playFilter;
-    return matchesQuery && matchesPlay;
-  }).sort((a, b) => {
-    const dateComp = a.date.localeCompare(b.date);
-    if (dateComp !== 0) return dateComp;
-    return (a.time || '').localeCompare(b.time || '');
+  $: filteredSchedules = globalIndex.filterSchedules({
+    query: scheduleQuery,
+    playFilter: playFilter
   });
 
   $: groupedByDate = (() => {
@@ -102,7 +97,7 @@
 
   $: dates = Object.keys(groupedByDate).sort();
 
-  $: selectedSchedule = schedules.find((s) => s.id === selectedScheduleId);
+  $: selectedSchedule = globalIndex.getScheduleById(selectedScheduleId);
 
   $: selectedRiskSummary = riskDate ? computeDailyRisk(riskDate, costumes, reservations, workOrders, packingLists) : [];
 
@@ -121,7 +116,7 @@
   }
 
   function openEditModal(id) {
-    const s = schedules.find((sch) => sch.id === id);
+    const s = globalIndex.getScheduleById(id);
     if (!s) return;
     editingScheduleId = id;
     scheduleForm = {
@@ -164,7 +159,7 @@
   }
 
   function confirmDeleteSchedule(id) {
-    const s = schedules.find((sch) => sch.id === id);
+    const s = globalIndex.getScheduleById(id);
     if (!s) return;
     if (!confirm(`确定要删除「${s.play}」${s.date}的排期吗？`)) return;
     deleteSchedule(id);
@@ -227,7 +222,13 @@
   }
 
   function getLinkedCostumeDetails(linkedCostumeIds) {
-    return costumes.filter((c) => (linkedCostumeIds || []).includes(c.id));
+    const ids = linkedCostumeIds || [];
+    const result = [];
+    for (const id of ids) {
+      const c = globalIndex.getCostumeById(id);
+      if (c) result.push(c);
+    }
+    return result;
   }
 
   const sizeOrder = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
@@ -256,14 +257,15 @@
   }
 
   function findActorByName(name) {
-    if (!name || !name.trim()) return null;
-    const trimmed = name.trim();
-    return actors.find((a) => a.name === trimmed) || null;
+    return globalIndex.findActorByName(name);
   }
 
   function getActorsForCostumeAndDate(costumeId, date) {
-    const dayReservations = reservations.filter(
-      (r) => r.costumeId === costumeId && r.date === date && r.status === 'active' && r.type === '演员'
+    const costume = globalIndex.getCostumeById(costumeId);
+    const play = costume?.play || '';
+    const dayReservationsAll = globalIndex.getActiveReservationsByPlayAndDate(play, date);
+    const dayReservations = dayReservationsAll.filter(
+      (r) => r.costumeId === costumeId && r.type === '演员'
     );
     const result = [];
     for (const r of dayReservations) {
@@ -271,7 +273,7 @@
       result.push({
         reservation: r,
         actor,
-        sizeMatch: actor ? matchSize(costumes.find((c) => c.id === costumeId)?.size, actor.size) : null
+        sizeMatch: actor ? matchSize(costume?.size, actor.size) : null
       });
     }
     return result;
@@ -286,43 +288,26 @@
 
   function getActorBorrowHistory(actorName) {
     if (!actorName) return [];
-    return costumes
-      .filter((c) => c.borrower === actorName)
-      .map((c) => ({
-        costumeName: c.name,
-        play: c.play,
-        timestamp: c.borrowedAt || new Date().toISOString(),
-        type: '借出'
-      }));
+    return globalIndex.getActorBorrowHistory(actorName).map((r) => ({
+      costumeName: r.costumeName,
+      play: r.play,
+      timestamp: r.timestamp || new Date().toISOString(),
+      type: '借出'
+    }));
   }
 
   function getActorReservationHistory(actorName) {
     if (!actorName) return [];
-    return reservations
-      .filter((r) => r.reservedFor === actorName && r.type === '演员' && r.status === 'active')
-      .map((r) => ({
-        costumeName: r.costumeName,
-        play: r.play,
-        date: r.date,
-        type: '预约'
-      }));
+    return globalIndex.getActorReservationHistory(actorName).map((r) => ({
+      costumeName: r.costumeName,
+      play: r.play,
+      date: r.date,
+      type: '预约'
+    }));
   }
 
   function getActorCostumeHistory(actorName) {
-    const borrowed = getActorBorrowHistory(actorName);
-    const reserved = getActorReservationHistory(actorName);
-    const costumeMap = new Map();
-    for (const r of borrowed) {
-      if (!costumeMap.has(r.costumeName)) {
-        costumeMap.set(r.costumeName, { name: r.costumeName, play: r.play, lastUsed: r.timestamp, type: '借出' });
-      }
-    }
-    for (const r of reserved) {
-      if (!costumeMap.has(r.costumeName)) {
-        costumeMap.set(r.costumeName, { name: r.costumeName, play: r.play, lastUsed: r.date, type: '预约' });
-      }
-    }
-    return [...costumeMap.values()].sort((a, b) => new Date(b.lastUsed) - new Date(a.lastUsed));
+    return globalIndex.getActorCostumeHistory(actorName);
   }
 
   function checkPlayMatch(costumePlay, actorPlays) {
@@ -353,11 +338,13 @@
     scheduleForm.linkedCostumeIds = scheduleForm.linkedCostumeIds.filter((id) => id !== costumeId);
   }
 
-  $: availableCostumesToLink = costumes.filter((c) => {
-    if (playFilter !== '全部剧目' && c.play !== playFilter) return false;
-    const text = `${c.name}${c.size}${c.play}${c.location}`;
-    return !scheduleForm.linkedCostumeIds.includes(c.id);
-  });
+  $: availableCostumesToLink = (() => {
+    const filtered = playFilter !== '全部剧目'
+      ? globalIndex.getCostumesByPlayFast(playFilter)
+      : globalIndex.getActiveCostumes();
+    const linkedSet = new Set(scheduleForm.linkedCostumeIds);
+    return filtered.filter((c) => !linkedSet.has(c.id));
+  })();
 
   $: detailLinkedCostumes = selectedSchedule ? getLinkedCostumeDetails(selectedSchedule.linkedCostumeIds) : [];
   $: detailScheduleRisk = selectedSchedule

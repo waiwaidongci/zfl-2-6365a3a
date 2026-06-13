@@ -6,17 +6,19 @@
     CheckCircle2, PauseCircle, XCircle, ArrowRight
   } from 'lucide-svelte';
   import {
-    compute30DayRisks,
-    getRiskStats,
     updateRiskProcessingStatus,
     RISK_STATUS,
     RISK_TYPE_LABELS
   } from '$lib/scheduleStore.js';
+  import { globalIndex } from '$lib/dataIndex.js';
 
-  export let costumes = [];
-  export let reservations = [];
-  export let workOrders = [];
-  export let packingLists = [];
+  const costumes = [];
+  const reservations = [];
+  const workOrders = [];
+  const packingLists = [];
+
+  $: allRisks = $globalIndex.computeAllRisks();
+  $: riskStats = $globalIndex.getRiskStats(allRisks);
 
   const dispatch = createEventDispatcher();
 
@@ -38,20 +40,15 @@
   let editingNote = false;
   let noteForm = { handler: '', note: '' };
 
-  $: allRisks = compute30DayRisks(costumes, reservations, workOrders, packingLists);
-  $: riskStats = getRiskStats(allRisks);
+  $: plays = ['全部剧目', ...(riskStats.byPlay ? Object.keys(riskStats.byPlay).filter(Boolean) : [])];
+  $: riskTypes = ['全部类型', ...(riskStats.byType ? Object.keys(riskStats.byType).filter(Boolean) : [])];
 
-  $: plays = ['全部剧目', ...new Set(allRisks.map((r) => r.schedulePlay).filter(Boolean))];
-  $: riskTypes = ['全部类型', ...new Set(allRisks.map((r) => r.type).filter(Boolean))];
-
-  $: filteredRisks = allRisks.filter((r) => {
-    const text = `${r.schedulePlay}${r.costumeName || ''}${r.message}${r.scheduleDate}${r.handler || ''}`;
-    const matchesQuery = text.includes(riskQuery.trim());
-    const matchesPlay = playFilter === '全部剧目' || r.schedulePlay === playFilter;
-    const matchesLevel = levelFilter === '全部级别' || r.level === levelFilter;
-    const matchesStatus = statusFilter === '全部状态' || r.processingStatus === statusFilter;
-    const matchesType = typeFilter === '全部类型' || r.type === typeFilter;
-    return matchesQuery && matchesPlay && matchesLevel && matchesStatus && matchesType;
+  $: filteredRisks = $globalIndex.filterRisks({
+    play: playFilter,
+    level: levelFilter,
+    status: statusFilter,
+    type: typeFilter,
+    query: riskQuery.trim()
   });
 
   $: groupedByStatus = (() => {
