@@ -107,7 +107,7 @@
   $: events = globalIndex.getAllEvents();
   $: riskStatuses = globalIndex.getAllRiskStatuses();
   $: syncQueue = globalIndex.getAllSyncQueue();
-  $: indexStats = globalIndex.getPerformanceStats();
+  $: indexStats = $globalIndex.getPerformanceStats();
 
   $: filtered = globalIndex.filterCostumes({
     query,

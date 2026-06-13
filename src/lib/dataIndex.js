@@ -3409,8 +3409,29 @@ class DataIndex {
   }
 
   getPerformanceStats() {
+    const recordCounts = this._stats.recordCounts || {
+      costumes: this._indexes.costumes.byId.size,
+      records: this._indexes.records.byId.size,
+      reservations: this._indexes.reservations.byId.size,
+      workOrders: this._indexes.workOrders.byId.size,
+      actors: this._indexes.actors.byId.size,
+      packingLists: this._indexes.packingLists.byId.size,
+      schedules: this._indexes.schedules.byId.size,
+      inventoryTasks: this._indexes.inventoryTasks.byId.size,
+      inventoryItems: this._indexes.inventoryItems.byId.size,
+      riskStatuses: this._indexes.riskStatuses.byId.size,
+      events: this._indexes.events.byId.size,
+      tombstones: this._indexes.tombstones.byId.size
+    };
+    const cacheQueries = this._stats.cacheHits + this._stats.cacheMisses;
+
     return {
       ...this._stats,
+      recordCounts,
+      totalRecords: Object.values(recordCounts).reduce((sum, count) => sum + count, 0),
+      searchQueries: this._stats.searchQueryCount,
+      filterQueries: this._stats.filterQueryCount,
+      cacheHitRate: cacheQueries > 0 ? (this._stats.cacheHits / cacheQueries) * 100 : 0,
       batchMode: this._batchMode,
       pendingBatchChanges: {
         added: this._batchChanges.added.size,
