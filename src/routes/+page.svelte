@@ -223,6 +223,7 @@
   let mergeDecisions = {};
   let mergeError = '';
   let mergeSuccess = '';
+  let currentMergeDB = null;
 
   let showPerformancePanel = false;
   let sampleDataConfig = {
@@ -561,6 +562,7 @@
       return;
     }
     const currentDB = getFullDB();
+    currentMergeDB = currentDB;
     mergeImportDB = parsed.db;
     mergeDiffResult = computeFullDiff(currentDB, parsed.db);
     mergeDecisions = createDefaultDecisions(mergeDiffResult);
@@ -576,6 +578,7 @@
     mergeDecisions = {};
     mergeFileName = '';
     mergeError = '';
+    currentMergeDB = null;
   }
 
   function handleConfirmMerge(finalDecisions) {
@@ -3965,8 +3968,8 @@
           bind:decisions={mergeDecisions}
           importFileName={mergeFileName}
           importMeta={mergeImportDB?._meta}
-          currentDB={currentDB}
-          importDB={mergeImportDB}
+          currentDB={currentMergeDB}
+          onUpdateDecisions={(d) => { mergeDecisions = d; }}
           onClose={closeMergePanel}
           onConfirmMerge={handleConfirmMerge}
         />

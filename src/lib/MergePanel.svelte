@@ -1,5 +1,5 @@
 <script>
-  import { X, AlertTriangle, CheckCircle, Plus, Minus, ChevronDown, ChevronRight, Save, ArrowRightLeft, Database, RefreshCw, CheckCircle2, XCircle, Edit3, Clock, Cpu, GitBranch, Activity } from 'lucide-svelte';
+  import { X, AlertTriangle, CheckCircle, Plus, Minus, ChevronDown, ChevronRight, Save, ArrowRightLeft, Database, RefreshCw, CheckCircle2, XCircle, Edit3, Clock, Cpu, GitBranch, Activity, Layers, Users, Calendar, ClipboardList, Box, Package, AlertOctagon, Zap, Eye, EyeOff, Filter, Shield, Trash2, Link, Unlink, BarChart3, ArrowRight, SkipForward, Settings2, Download } from 'lucide-svelte';
   import { TABLES, TABLE_LABELS, EVENT_TYPE_LABELS } from '$lib/database.js';
   import {
     DIFF_TYPES,
@@ -10,15 +10,15 @@
     AUTO_MERGE_TABLES,
     collectPendingConflicts,
     fieldValueToString,
-    RISK_LEVELS,
-    RISK_LEVEL_LABELS,
     BATCH_STRATEGIES,
     BATCH_STRATEGY_LABELS,
-    REFERENCE_TABLE_LABELS,
-    buildMergePreview,
-    applyBatchStrategy,
-    applyBatchStrategyByRisk,
-    generateImpactSummary
+    RISK_LEVELS,
+    RISK_LEVEL_LABELS,
+    IMPACT_TYPE_LABELS,
+    buildPreviewSummary,
+    computeImpactAnalysis,
+    computeRiskList,
+    applyBatchStrategy
   } from '$lib/mergeUtils.js';
 
   export let diffResult;
@@ -26,30 +26,41 @@
   export let importFileName;
   export let importMeta;
   export let currentDB;
-  export let importDB;
   export let onClose;
   export let onConfirmMerge;
+  export let onUpdateDecisions;
+
+  const PHASES = {
+    PREVIEW: 'preview',
+    REVIEW: 'review',
+    CONFIRM: 'confirm'
+  };
+  let phase = PHASES.PREVIEW;
 
   let activeTable = TABLES.costumes;
   let activeFilter = DIFF_TYPES.FIELD_CONFLICT;
+  let previewGroupBy = 'table';
   let expandedItems = new Set();
   let expandedTimelines = new Set();
   let manualEditItem = null;
   let manualEditTable = null;
   let manualMergeData = {};
-  let viewMode = 'preview';
-  let previewGroupBy = 'risk';
-  let expandedRiskGroups = new Set([RISK_LEVELS.CRITICAL, RISK_LEVELS.HIGH]);
-  let expandedTableGroups = new Set();
-  let showImpactPanel = false;
-  let expandedImpactSections = new Set(['dangling', 'deleted']);
+  let selectedBatchStrategy = BATCH_STRATEGIES.LATEST_EVENT;
+  let batchScope = { tables: null, riskLevels: null, diffTypes: null };
+  let previewExpandedTables = new Set();
+  let showRiskDetails = false;
 
+  $: impactAnalysis = currentDB && diffResult ? computeImpactAnalysis(currentDB, diffResult) : {};
+  $: previewSummary = diffResult && impactAnalysis ? buildPreviewSummary(diffResult, impactAnalysis) : null;
   $: pending = collectPendingConflicts(diffResult, decisions);
   $: pendingCount = pending.length;
   $: canProceed = pendingCount === 0;
   $: activeFilterItems = diffResult.tables?.[activeTable]?.[activeFilter] || [];
   $: currentMeta = diffResult?.currentMeta || null;
   $: deviceStats = getDeviceStats(diffResult);
+  $: riskList = currentDB && diffResult && decisions && impactAnalysis
+    ? computeRiskList(currentDB, diffResult, decisions, impactAnalysis)
+    : { toDelete: [], toRemap: [], danglingRisk: [], deletedIds: new Set(), remappedIds: {} };
 
   const TABLE_ORDER = MERGE_TABLES;
 
@@ -138,20 +149,29 @@
   }
 
   function getRiskClass(severity) {
-    return severity === 'danger' ? 'risk-danger' : 'risk-warning';
+    return severity === 'danger' ? 'risk-danger' : (severity === 'warning' ? 'risk-warning' : 'risk-info');
   }
 
   function toggleItem(id) {
-    if (expandedItems.has(id)) {
-      expandedItems.delete(id);
-    } else {
-      expandedItems.add(id);
-    }
+    if (expandedItems.has(id)) expandedItems.delete(id);
+    else expandedItems.add(id);
     expandedItems = new Set(expandedItems);
   }
 
+  function togglePreviewTable(table) {
+    if (previewExpandedTables.has(table)) previewExpandedTables.delete(table);
+    else previewExpandedTables.add(table);
+    previewExpandedTables = new Set(previewExpandedTables);
+  }
+
+  function formatShortTime(ts) {
+    if (!ts) return '未知';
+    const d = new Date(ts);
+    return d.toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false });
+  }
+
   function setDecision(table, id, choice) {
-    decisions = {
+    const newDec = {
       ...decisions,
       [table]: {
         ...(decisions[table] || {}),
@@ -163,12 +183,14 @@
         }
       }
     };
+    decisions = newDec;
+    onUpdateDecisions?.(newDec);
   }
 
   function applyAutoMergedSuggestion(table, id, item) {
     const dec = decisions[table]?.[id];
     if (dec?.autoMergedData) {
-      decisions = {
+      const newDec = {
         ...decisions,
         [table]: {
           ...(decisions[table] || {}),
@@ -178,6 +200,8 @@
           }
         }
       };
+      decisions = newDec;
+      onUpdateDecisions?.(newDec);
     }
   }
 
@@ -193,7 +217,7 @@
     for (const [k, v] of Object.entries(manualMergeData)) {
       merged[k] = v;
     }
-    decisions = {
+    const newDec = {
       ...decisions,
       [table]: {
         ...(decisions[table] || {}),
@@ -203,6 +227,8 @@
         }
       }
     };
+    decisions = newDec;
+    onUpdateDecisions?.(newDec);
   }
 
   function updateManualField(fieldName, value) {
@@ -215,7 +241,7 @@
     for (const [k, v] of Object.entries(manualMergeData)) {
       merged[k] = v;
     }
-    decisions = {
+    const newDec = {
       ...decisions,
       [manualEditTable]: {
         ...(decisions[manualEditTable] || {}),
@@ -225,6 +251,8 @@
         }
       }
     };
+    decisions = newDec;
+    onUpdateDecisions?.(newDec);
   }
 
   function saveManualEdit() {
@@ -235,7 +263,7 @@
 
   function cancelManualEdit() {
     if (manualEditTable && manualEditItem) {
-      decisions = {
+      const newDec = {
         ...decisions,
         [manualEditTable]: {
           ...(decisions[manualEditTable] || {}),
@@ -245,6 +273,8 @@
           }
         }
       };
+      decisions = newDec;
+      onUpdateDecisions?.(newDec);
     }
     manualEditItem = null;
     manualEditTable = null;
@@ -257,95 +287,50 @@
   }
 
   function batchResolveAll(choice) {
-    for (const table of Object.keys(diffResult.tables)) {
-      const td = diffResult.tables[table];
-      const conflicts = [
-        ...td[DIFF_TYPES.FIELD_CONFLICT],
-        ...td[DIFF_TYPES.DELETED_SUSPECT],
-        ...td[DIFF_TYPES.EVENT_BASED_RESOLVABLE]
-      ];
-      for (const item of conflicts) {
-        const dec = decisions[table]?.[item.id];
-        if (!dec || !dec.choice) {
-          setDecision(table, item.id, choice);
-        }
-      }
-    }
+    const newDec = applyBatchStrategy(
+      diffResult,
+      decisions,
+      choice === DECISION_CHOICES.KEEP_CURRENT ? BATCH_STRATEGIES.KEEP_CURRENT_ALL : BATCH_STRATEGIES.USE_IMPORT_ALL
+    );
+    decisions = newDec;
+    onUpdateDecisions?.(newDec);
   }
 
-  $: mergePreview = currentDB && importDB && diffResult
-    ? buildMergePreview(diffResult, currentDB, importDB)
-    : null;
-
-  $: impactSummary = currentDB && importDB && diffResult && decisions
-    ? generateImpactSummary(diffResult, decisions, currentDB, importDB)
-    : null;
-
-  function handleBatchStrategy(strategy) {
-    if (!diffResult) return;
-    decisions = applyBatchStrategy(diffResult, decisions, strategy);
+  function handleApplyBatchStrategy() {
+    const newDec = applyBatchStrategy(diffResult, decisions, selectedBatchStrategy, batchScope);
+    decisions = newDec;
+    onUpdateDecisions?.(newDec);
   }
 
-  function handleBatchStrategyByRisk(strategy, riskLevel) {
-    if (!diffResult || !mergePreview) return;
-    decisions = applyBatchStrategyByRisk(diffResult, decisions, strategy, riskLevel, mergePreview);
+  function goToPhase(target) {
+    phase = target;
   }
 
-  function toggleRiskGroup(level) {
-    if (expandedRiskGroups.has(level)) {
-      expandedRiskGroups.delete(level);
-    } else {
-      expandedRiskGroups.add(level);
-    }
-    expandedRiskGroups = new Set(expandedRiskGroups);
-  }
-
-  function toggleTableGroup(table) {
-    if (expandedTableGroups.has(table)) {
-      expandedTableGroups.delete(table);
-    } else {
-      expandedTableGroups.add(table);
-    }
-    expandedTableGroups = new Set(expandedTableGroups);
-  }
-
-  function toggleImpactSection(section) {
-    if (expandedImpactSections.has(section)) {
-      expandedImpactSections.delete(section);
-    } else {
-      expandedImpactSections.add(section);
-    }
-    expandedImpactSections = new Set(expandedImpactSections);
-  }
-
-  function jumpToDetail(table, id, diffType) {
+  function jumpToReview(table, id, diffType) {
     activeTable = table;
     activeFilter = diffType;
-    viewMode = 'detail';
-    expandedItems.add(id);
-    expandedItems = new Set(expandedItems);
-  }
-
-  function getRiskBadgeClass(level) {
-    switch (level) {
-      case RISK_LEVELS.CRITICAL: return 'risk-badge-critical';
-      case RISK_LEVELS.HIGH: return 'risk-badge-high';
-      case RISK_LEVELS.MEDIUM: return 'risk-badge-medium';
-      case RISK_LEVELS.LOW: return 'risk-badge-low';
-      case RISK_LEVELS.INFO: return 'risk-badge-info';
-      default: return '';
+    phase = PHASES.REVIEW;
+    if (id) {
+      expandedItems.add(id);
+      expandedItems = new Set(expandedItems);
     }
   }
 
-  function getRiskIcon(level) {
-    switch (level) {
-      case RISK_LEVELS.CRITICAL:
-      case RISK_LEVELS.HIGH:
-        return 'alert';
-      case RISK_LEVELS.MEDIUM:
-        return 'warning';
-      default:
-        return 'info';
+  function getImpactBadgeClass(range) {
+    switch (range) {
+      case 'high': return 'impact-high';
+      case 'medium': return 'impact-medium';
+      case 'low': return 'impact-low';
+      default: return 'impact-none';
+    }
+  }
+
+  function getImpactRangeLabel(range) {
+    switch (range) {
+      case 'high': return '高影响 (≥10)';
+      case 'medium': return '中影响 (3-9)';
+      case 'low': return '低影响 (1-2)';
+      default: return '无引用';
     }
   }
 
@@ -405,540 +390,399 @@
     </div>
   {/if}
 
-  <div class="view-tabs">
+  <div class="phase-tabs">
     <button
       type="button"
-      class="view-tab {viewMode === 'preview' ? 'active' : ''}"
-      on:click={() => { viewMode = 'preview'; }}
+      class="phase-tab {phase === 'preview' ? 'active' : ''}"
+      on:click={() => goToPhase('preview')}
     >
-      <Activity size={14} />
-      合并预演
+      <BarChart3 size={14} />
+      <span>① 合并预演</span>
+      <span class="phase-hint">分组摘要 + 批量策略</span>
     </button>
+    <div class="phase-arrow"><ArrowRight size={14} /></div>
     <button
       type="button"
-      class="view-tab {viewMode === 'detail' ? 'active' : ''}"
-      on:click={() => { viewMode = 'detail'; }}
+      class="phase-tab {phase === 'review' ? 'active' : ''}"
+      on:click={() => goToPhase('review')}
     >
-      <Edit3 size={14} />
-      逐条详情
+      <Eye size={14} />
+      <span>② 逐条审核</span>
+      <span class="phase-hint">
+        {#if pendingCount > 0}
+          <AlertTriangle size={12} class="inline-icon warn" /> {pendingCount} 项待决定
+        {:else}
+          <CheckCircle size={12} class="inline-icon ok" /> 全部已决定
+        {/if}
+      </span>
     </button>
+    <div class="phase-arrow"><ArrowRight size={14} /></div>
     <button
       type="button"
-      class="view-tab {showImpactPanel ? 'active' : ''}"
-      on:click={() => { showImpactPanel = !showImpactPanel; }}
+      class="phase-tab {phase === 'confirm' ? 'active' : ''}"
+      on:click={() => goToPhase('confirm')}
+      disabled={!canProceed}
     >
-      <AlertTriangle size={14} />
-      影响清单
-      {#if impactSummary && impactSummary.stats.danglingRiskCount > 0}
-        <span class="impact-badge">{impactSummary.stats.danglingRiskCount}</span>
-      {/if}
+      <Shield size={14} />
+      <span>③ 执行确认</span>
+      <span class="phase-hint">
+        {#if canProceed}
+          <CheckCircle2 size={12} class="inline-icon ok" /> 可执行
+        {:else}
+          <XCircle size={12} class="inline-icon warn" /> 待完成审核
+        {/if}
+      </span>
     </button>
   </div>
 
-  {#if viewMode === 'preview' && mergePreview}
-    <div class="preview-panel">
-      <div class="batch-strategy-bar">
-        <span class="batch-label">批量策略：</span>
-        <button
-          type="button"
-          class="batch-btn"
-          on:click={() => handleBatchStrategy(BATCH_STRATEGIES.AUTO_BY_EVENT)}
-        >
-          <GitBranch size={12} />
-          按事件时间线自动
-        </button>
-        <button
-          type="button"
-          class="batch-btn"
-          on:click={() => handleBatchStrategy(BATCH_STRATEGIES.AUTO_BY_LATEST)}
-        >
-          <Clock size={12} />
-          按最新时间自动
-        </button>
-        <button
-          type="button"
-          class="batch-btn"
-          on:click={() => handleBatchStrategy(BATCH_STRATEGIES.KEEP_ALL_CURRENT)}
-        >
-          全部保留当前
-        </button>
-        <button
-          type="button"
-          class="batch-btn"
-          on:click={() => handleBatchStrategy(BATCH_STRATEGIES.USE_ALL_IMPORT)}
-        >
-          全部使用导入
-        </button>
-      </div>
-
-      <div class="preview-stats-bar">
-        <div class="stat-item">
-          <span class="stat-num">{mergePreview.summary.totalRecords}</span>
-          <span class="stat-label">总记录</span>
+  {#if phase === 'preview' && previewSummary}
+    <div class="preview-phase">
+      <div class="preview-section">
+        <div class="section-title">
+          <Layers size={16} />
+          <span>按<strong>数据表</strong>分组（共 {previewSummary.totals.tables} 张表需要决策）</span>
         </div>
-        <div class="stat-item stat-add">
-          <span class="stat-num">{mergePreview.summary.totalAdds}</span>
-          <span class="stat-label">新增</span>
-        </div>
-        <div class="stat-item stat-delete">
-          <span class="stat-num">{mergePreview.summary.totalDeletes}</span>
-          <span class="stat-label">删除</span>
-        </div>
-        <div class="stat-item stat-update">
-          <span class="stat-num">{mergePreview.summary.totalModified}</span>
-          <span class="stat-label">修改</span>
-        </div>
-        <div class="stat-item stat-conflict">
-          <span class="stat-num">{mergePreview.summary.totalConflicts}</span>
-          <span class="stat-label">冲突</span>
-        </div>
-        <div class="stat-item stat-ref">
-          <span class="stat-num">{mergePreview.summary.estimatedImpact.totalMaxReferences}</span>
-          <span class="stat-label">关联引用</span>
-        </div>
-      </div>
-
-      <div class="preview-group-tabs">
-        <button
-          type="button"
-          class="group-tab {previewGroupBy === 'risk' ? 'active' : ''}"
-          on:click={() => { previewGroupBy = 'risk'; }}
-        >
-          <AlertTriangle size={12} />
-          按风险级别
-        </button>
-        <button
-          type="button"
-          class="group-tab {previewGroupBy === 'table' ? 'active' : ''}"
-          on:click={() => { previewGroupBy = 'table'; }}
-        >
-          <Database size={12} />
-          按数据表
-        </button>
-        <button
-          type="button"
-          class="group-tab {previewGroupBy === 'ref' ? 'active' : ''}"
-          on:click={() => { previewGroupBy = 'ref'; }}
-        >
-          <ArrowRightLeft size={12} />
-          按引用数量
-        </button>
-      </div>
-
-      <div class="preview-groups">
-        {#if previewGroupBy === 'risk'}
-          {#each [RISK_LEVELS.CRITICAL, RISK_LEVELS.HIGH, RISK_LEVELS.MEDIUM, RISK_LEVELS.LOW, RISK_LEVELS.INFO] as level}
-            {@const items = mergePreview.byRiskLevel[level] || []}
-            {#if items.length > 0}
-              <div class="preview-group risk-group {getRiskBadgeClass(level)}">
+        <div class="preview-tables-grid">
+          {#each Object.keys(previewSummary.byTable) as table}
+            {@const info = previewSummary.byTable[table]}
+            {#if info.needsDecision > 0}
+              <div class="preview-table-card">
                 <button
                   type="button"
-                  class="group-header"
-                  on:click={() => toggleRiskGroup(level)}
+                  class="ptc-header"
+                  on:click={() => togglePreviewTable(table)}
                 >
-                  {#if expandedRiskGroups.has(level)}
+                  {#if previewExpandedTables.has(table)}
                     <ChevronDown size={16} />
                   {:else}
                     <ChevronRight size={16} />
                   {/if}
-                  <span class="group-title">
-                    <span class="risk-dot {getRiskBadgeClass(level)}"></span>
-                    {RISK_LEVEL_LABELS[level]}
+                  <span class="ptc-name">{info.label}</span>
+                  <span class="ptc-badges">
+                    <span class="ptc-badge warn"><AlertTriangle size={10} /> {info.needsDecision} 项待决</span>
+                    {#if info.totalImpactCount > 0}
+                      <span class="ptc-badge impact">
+                        <Users size={10} /> 影响 {info.totalImpactCount} 处引用
+                      </span>
+                    {/if}
                   </span>
-                  <span class="group-count">{items.length} 条</span>
-                  <div class="group-actions">
-                    <button
-                      type="button"
-                      class="mini-btn"
-                      on:click|stopPropagation={() => handleBatchStrategyByRisk(BATCH_STRATEGIES.KEEP_ALL_CURRENT, level)}
-                    >
-                      批量保留当前
-                    </button>
-                    <button
-                      type="button"
-                      class="mini-btn primary"
-                      on:click|stopPropagation={() => handleBatchStrategyByRisk(BATCH_STRATEGIES.USE_ALL_IMPORT, level)}
-                    >
-                      批量使用导入
-                    </button>
-                  </div>
                 </button>
-                {#if expandedRiskGroups.has(level)}
-                  <div class="group-items">
-                    {#each items as item}
-                      {@const dec = decisions[item.table]?.[item.id]}
-                      <div class="preview-item {dec?.choice ? 'decided' : 'undecided'}"
-                           on:click={() => jumpToDetail(item.table, item.id, item.diffType)}>
-                        <div class="item-main">
-                          <span class="item-table-tag">{TABLE_LABELS[item.table]}</span>
-                          <span class="item-name">{item.impact.recordName || item.id.slice(0, 8)}</span>
-                          <span class="item-type-tag {getFilterClass(item.diffType)}">{DIFF_LABELS[item.diffType]}</span>
-                        </div>
-                        <div class="item-meta">
-                          {#if item.impact.referenceCounts.maxTotal > 0}
-                            <span class="ref-count">
-                              <ArrowRightLeft size={10} />
-                              {item.impact.referenceCounts.maxTotal} 条引用
-                            </span>
-                          {/if}
-                          {#if dec?.choice}
-                            <span class="decision-tag decision-{dec.choice}">
-                              {DECISION_LABELS[dec.choice]}
-                            </span>
-                          {:else}
-                            <span class="decision-tag decision-pending">待处理</span>
-                          {/if}
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          {/each}
-        {:else if previewGroupBy === 'table'}
-          {#each TABLE_ORDER as table}
-            {@const tableData = mergePreview.byTable[table]}
-            {#if tableData && tableData.total > 0}
-              <div class="preview-group table-group">
-                <button
-                  type="button"
-                  class="group-header"
-                  on:click={() => toggleTableGroup(table)}
-                >
-                  {#if expandedTableGroups.has(table)}
-                    <ChevronDown size={16} />
-                  {:else}
-                    <ChevronRight size={16} />
-                  {/if}
-                  <span class="group-title">
-                    <Database size={14} />
-                    {TABLE_LABELS[table]}
-                  </span>
-                  <span class="group-count">{tableData.total} 条</span>
-                  <div class="group-chips">
-                    {#if tableData.byType[DIFF_TYPES.ADDED]}
-                      <span class="sum-chip diff-added">{tableData.byType[DIFF_TYPES.ADDED]}新增</span>
-                    {/if}
-                    {#if tableData.byType[DIFF_TYPES.FIELD_CONFLICT]}
-                      <span class="sum-chip diff-conflict">{tableData.byType[DIFF_TYPES.FIELD_CONFLICT]}冲突</span>
-                    {/if}
-                    {#if tableData.byType[DIFF_TYPES.DELETED_SUSPECT] || tableData.byType[DIFF_TYPES.TRUE_DELETE]}
-                      <span class="sum-chip diff-deleted">{(tableData.byType[DIFF_TYPES.DELETED_SUSPECT] || 0) + (tableData.byType[DIFF_TYPES.TRUE_DELETE] || 0)}删除</span>
-                    {/if}
-                    {#if tableData.byType[DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT]}
-                      <span class="sum-chip diff-cur-mod">{tableData.byType[DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT]}当前更新</span>
-                    {/if}
-                    {#if tableData.byType[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]}
-                      <span class="sum-chip diff-imp-mod">{tableData.byType[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]}导入更新</span>
-                    {/if}
-                  </div>
-                </button>
-                {#if expandedTableGroups.has(table)}
-                  <div class="group-items">
-                    {#each tableData.items as item}
-                      {@const dec = decisions[item.table]?.[item.id]}
-                      <div class="preview-item {dec?.choice ? 'decided' : 'undecided'}"
-                           on:click={() => jumpToDetail(item.table, item.id, item.diffType)}>
-                        <div class="item-main">
-                          <span class="risk-mini-badge {getRiskBadgeClass(item.riskLevel)}">
-                            {RISK_LEVEL_LABELS[item.riskLevel]}
-                          </span>
-                          <span class="item-name">{item.impact.recordName || item.id.slice(0, 8)}</span>
-                          <span class="item-type-tag {getFilterClass(item.diffType)}">{DIFF_LABELS[item.diffType]}</span>
-                        </div>
-                        <div class="item-meta">
-                          {#if item.impact.referenceCounts.maxTotal > 0}
-                            <span class="ref-count">
-                              <ArrowRightLeft size={10} />
-                              {item.impact.referenceCounts.maxTotal} 条引用
-                            </span>
-                          {/if}
-                          {#if dec?.choice}
-                            <span class="decision-tag decision-{dec.choice}">
-                              {DECISION_LABELS[dec.choice]}
-                            </span>
-                          {:else}
-                            <span class="decision-tag decision-pending">待处理</span>
-                          {/if}
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          {/each}
-        {:else if previewGroupBy === 'ref'}
-          {#each ['high', 'medium', 'low', 'none'] as refLevel}
-            {@const items = mergePreview.byRefCount[refLevel] || []}
-            {#if items.length > 0}
-              <div class="preview-group ref-group ref-{refLevel}">
-                <button
-                  type="button"
-                  class="group-header"
-                  on:click={() => toggleRiskGroup(refLevel)}
-                >
-                  {#if expandedRiskGroups.has(refLevel)}
-                    <ChevronDown size={16} />
-                  {:else}
-                    <ChevronRight size={16} />
-                  {/if}
-                  <span class="group-title">
-                    <ArrowRightLeft size={14} />
-                    {refLevel === 'high' ? '高引用（≥10条）' :
-                     refLevel === 'medium' ? '中引用（3-9条）' :
-                     refLevel === 'low' ? '低引用（1-2条）' : '无引用'}
-                  </span>
-                  <span class="group-count">{items.length} 条</span>
-                </button>
-                {#if expandedRiskGroups.has(refLevel)}
-                  <div class="group-items">
-                    {#each items as item}
-                      {@const dec = decisions[item.table]?.[item.id]}
-                      <div class="preview-item {dec?.choice ? 'decided' : 'undecided'}"
-                           on:click={() => jumpToDetail(item.table, item.id, item.diffType)}>
-                        <div class="item-main">
-                          <span class="item-table-tag">{TABLE_LABELS[item.table]}</span>
-                          <span class="item-name">{item.impact.recordName || item.id.slice(0, 8)}</span>
-                          <span class="item-type-tag {getFilterClass(item.diffType)}">{DIFF_LABELS[item.diffType]}</span>
-                        </div>
-                        <div class="item-meta">
-                          <span class="ref-count">
-                            <ArrowRightLeft size={10} />
-                            {item.impact.referenceCounts.maxTotal} 条引用
-                          </span>
-                          {#if dec?.choice}
-                            <span class="decision-tag decision-{dec.choice}">
-                              {DECISION_LABELS[dec.choice]}
-                            </span>
-                          {:else}
-                            <span class="decision-tag decision-pending">待处理</span>
-                          {/if}
-                        </div>
-                      </div>
-                    {/each}
-                  </div>
-                {/if}
-              </div>
-            {/if}
-          {/each}
-        {/if}
-      </div>
-    </div>
-  {/if}
-
-  {#if showImpactPanel && impactSummary}
-    <div class="impact-panel">
-      <div class="impact-header">
-        <h3><AlertTriangle size={16} /> 合并影响清单</h3>
-      </div>
-
-      <div class="impact-stats">
-        <div class="impact-stat danger">
-          <span class="impact-stat-num">{impactSummary.stats.danglingRiskCount}</span>
-          <span class="impact-stat-label">悬空引用风险</span>
-        </div>
-        <div class="impact-stat warning">
-          <span class="impact-stat-num">{impactSummary.stats.deleteCount}</span>
-          <span class="impact-stat-label">将删除记录</span>
-        </div>
-        <div class="impact-stat info">
-          <span class="impact-stat-num">{impactSummary.stats.remapCount}</span>
-          <span class="impact-stat-label">ID重映射</span>
-        </div>
-        <div class="impact-stat success">
-          <span class="impact-stat-num">{impactSummary.stats.addCount}</span>
-          <span class="impact-stat-label">将新增记录</span>
-        </div>
-      </div>
-
-      <div class="impact-detail">
-        {#if impactSummary.danglingRisks.length > 0}
-          <div class="impact-section">
-            <button
-              type="button"
-              class="section-header danger"
-              on:click={() => toggleImpactSection('dangling')}
-            >
-              {#if expandedImpactSections.has('dangling')}
-                <ChevronDown size={14} />
-              {:else}
-                <ChevronRight size={14} />
-              {/if}
-              <AlertTriangle size={14} />
-              <span>悬空引用风险（{impactSummary.danglingRisks.length} 条）</span>
-            </button>
-            {#if expandedImpactSections.has('dangling')}
-              <div class="section-items">
-                {#each impactSummary.danglingRisks as risk, i}
-                  <div class="impact-item risk-danger">
-                    <div class="impact-item-main">
-                      <span class="impact-table-tag">{TABLE_LABELS[risk.table]}</span>
-                      <span class="impact-item-name">{risk.recordName}</span>
-                    </div>
-                    <div class="impact-item-desc">{risk.message}</div>
-                    <div class="impact-item-meta">
-                      字段：<code>{risk.field}</code>
-                      · 缺失服装：{risk.missingCostumeName || risk.missingCostumeId.slice(0, 8)}
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/if}
-
-        {#if impactSummary.willBeDeleted.length > 0}
-          <div class="impact-section">
-            <button
-              type="button"
-              class="section-header warning"
-              on:click={() => toggleImpactSection('deleted')}
-            >
-              {#if expandedImpactSections.has('deleted')}
-                <ChevronDown size={14} />
-              {:else}
-                <ChevronRight size={14} />
-              {/if}
-              <Minus size={14} />
-              <span>将删除的记录（{impactSummary.willBeDeleted.length} 条）</span>
-            </button>
-            {#if expandedImpactSections.has('deleted')}
-              <div class="section-items">
-                {#each impactSummary.willBeDeleted as del}
-                  <div class="impact-item delete-item">
-                    <div class="impact-item-main">
-                      <span class="impact-table-tag">{TABLE_LABELS[del.table]}</span>
-                      <span class="impact-item-name">{del.recordName}</span>
-                      {#if del.isTrueDelete}
-                        <span class="tombstone-tag">有墓碑</span>
+                {#if previewExpandedTables.has(table)}
+                  <div class="ptc-body">
+                    <div class="ptc-stats">
+                      {#if info.counts?.[DIFF_TYPES.FIELD_CONFLICT]}
+                        <span class="stat-chip diff-conflict">字段冲突 ×{info.counts[DIFF_TYPES.FIELD_CONFLICT]}</span>
+                      {/if}
+                      {#if info.counts?.[DIFF_TYPES.DELETED_SUSPECT]}
+                        <span class="stat-chip diff-deleted">疑似删除 ×{info.counts[DIFF_TYPES.DELETED_SUSPECT]}</span>
+                      {/if}
+                      {#if info.counts?.[DIFF_TYPES.EVENT_BASED_RESOLVABLE]}
+                        <span class="stat-chip diff-event">时间线可决 ×{info.counts[DIFF_TYPES.EVENT_BASED_RESOLVABLE]}</span>
+                      {/if}
+                      {#if info.counts?.[DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT]}
+                        <span class="stat-chip diff-cur-mod">仅当前改 ×{info.counts[DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT]}</span>
+                      {/if}
+                      {#if info.counts?.[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]}
+                        <span class="stat-chip diff-imp-mod">仅导入改 ×{info.counts[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT]}</span>
                       {/if}
                     </div>
-                    <div class="impact-item-meta">
-                      ID: {del.id.slice(0, 12)}...
+                    <div class="ptc-rows">
+                      {#each info.items as row}
+                        <div class="ptc-row {getRiskClass(row.riskLevel)}">
+                          <div class="ptc-row-main">
+                            <span class="risk-dot risk-{row.riskLevel}" title="{RISK_LEVEL_LABELS[row.riskLevel]}"></span>
+                            <button
+                              type="button"
+                              class="ptc-row-name"
+                              on:click={() => jumpToReview(row.table, row.id, row.diffType)}
+                            >
+                              {row.recordName}
+                            </button>
+                            <span class="ptc-row-type diff-{row.diffType}">{DIFF_LABELS[row.diffType]}</span>
+                          </div>
+                          <div class="ptc-row-meta">
+                            {#if row.impactTotal > 0}
+                              <span class="ptc-impact {getImpactBadgeClass(row.impactRange)}">
+                                <Users size={10} /> {row.impactTotal} 引用
+                              </span>
+                            {/if}
+                            {#if row.timelineCanAuto}
+                              <span class="ptc-timeline-auto" title="{row.timelineReason}">
+                                <Clock size={10} /> 可自动
+                              </span>
+                            {/if}
+                            {#if row.conflictFields.length > 0}
+                              <span class="ptc-fields" title={row.conflictFields.join('、')}>
+                                冲突：{row.conflictFields.slice(0, 2).join('、')}{row.conflictFields.length > 2 ? '…' : ''}
+                              </span>
+                            {/if}
+                          </div>
+                        </div>
+                      {/each}
                     </div>
                   </div>
-                {/each}
+                {/if}
               </div>
             {/if}
-          </div>
-        {/if}
-
-        {#if impactSummary.willBeRemapped.length > 0}
-          <div class="impact-section">
-            <button
-              type="button"
-              class="section-header info"
-              on:click={() => toggleImpactSection('remapped')}
-            >
-              {#if expandedImpactSections.has('remapped')}
-                <ChevronDown size={14} />
-              {:else}
-                <ChevronRight size={14} />
-              {/if}
-              <ArrowRightLeft size={14} />
-              <span>ID 重映射（{impactSummary.willBeRemapped.length} 组）</span>
-            </button>
-            {#if expandedImpactSections.has('remapped')}
-              <div class="section-items">
-                {#each impactSummary.willBeRemapped as remap}
-                  <div class="impact-item remap-item">
-                    <div class="remap-flow">
-                      <span class="remap-from">{remap.fromName}</span>
-                      <ArrowRightLeft size={14} />
-                      <span class="remap-to">{remap.toName}</span>
-                    </div>
-                    <div class="impact-item-meta">
-                      {remap.fromId.slice(0, 8)}... → {remap.toId.slice(0, 8)}...
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/if}
-
-        {#if impactSummary.willBeAdded.length > 0}
-          <div class="impact-section">
-            <button
-              type="button"
-              class="section-header success"
-              on:click={() => toggleImpactSection('added')}
-            >
-              {#if expandedImpactSections.has('added')}
-                <ChevronDown size={14} />
-              {:else}
-                <ChevronRight size={14} />
-              {/if}
-              <Plus size={14} />
-              <span>将新增的记录（{impactSummary.willBeAdded.length} 条）</span>
-            </button>
-            {#if expandedImpactSections.has('added')}
-              <div class="section-items">
-                {#each impactSummary.willBeAdded as add}
-                  <div class="impact-item add-item">
-                    <div class="impact-item-main">
-                      <span class="impact-table-tag">{TABLE_LABELS[add.table]}</span>
-                      <span class="impact-item-name">{add.recordName}</span>
-                    </div>
-                    <div class="impact-item-meta">
-                      ID: {add.id.slice(0, 12)}...
-                    </div>
-                  </div>
-                {/each}
-              </div>
-            {/if}
-          </div>
-        {/if}
-
-        <div class="impact-summary-box">
-          <h4><Database size={14} /> 受影响业务数据估计</h4>
-          <div class="impact-summary-grid">
-            {#if impactSummary.stats.affectedReservations > 0}
-              <div class="impact-summary-item">
-                <span class="num">{impactSummary.stats.affectedReservations}</span>
-                <span class="label">排练预约</span>
-              </div>
-            {/if}
-            {#if impactSummary.stats.affectedWorkOrders > 0}
-              <div class="impact-summary-item">
-                <span class="num">{impactSummary.stats.affectedWorkOrders}</span>
-                <span class="label">清洗/维修工单</span>
-              </div>
-            {/if}
-            {#if impactSummary.stats.affectedSchedules > 0}
-              <div class="impact-summary-item">
-                <span class="num">{impactSummary.stats.affectedSchedules}</span>
-                <span class="label">演出排期</span>
-              </div>
-            {/if}
-            {#if impactSummary.stats.affectedPackingLists > 0}
-              <div class="impact-summary-item">
-                <span class="num">{impactSummary.stats.affectedPackingLists}</span>
-                <span class="label">装箱单</span>
-              </div>
-            {/if}
-            {#if impactSummary.stats.affectedInventoryItems > 0}
-              <div class="impact-summary-item">
-                <span class="num">{impactSummary.stats.affectedInventoryItems}</span>
-                <span class="label">盘点明细</span>
-              </div>
-            {/if}
-            {#if impactSummary.stats.affectedRecords > 0}
-              <div class="impact-summary-item">
-                <span class="num">{impactSummary.stats.affectedRecords}</span>
-                <span class="label">借还记录</span>
-              </div>
-            {/if}
-          </div>
-          <p class="impact-hint">* 以上为基于当前决策的预估影响，实际结果以合并执行为准</p>
+          {/each}
         </div>
+      </div>
+
+      <div class="preview-section">
+        <div class="section-title">
+          <Shield size={16} />
+          <span>按<strong>风险级别</strong>分组</span>
+        </div>
+        <div class="risk-level-grid">
+          <div class="rl-card danger">
+            <div class="rl-title"><AlertOctagon size={16} /> 高危</div>
+            <div class="rl-count">{previewSummary.totals.danger}</div>
+            <div class="rl-list">
+              {#each previewSummary.byRiskLevel[RISK_LEVELS.DANGER].slice(0, 5) as row}
+                <button
+                  type="button"
+                  class="rl-item"
+                  on:click={() => jumpToReview(row.table, row.id, row.diffType)}
+                >
+                  <span class="rl-name">{TABLE_LABELS[row.table]}: {row.recordName}</span>
+                  {#if row.impactTotal > 0}
+                    <span class="rl-imp">{row.impactTotal}引用</span>
+                  {/if}
+                </button>
+              {/each}
+              {#if previewSummary.byRiskLevel[RISK_LEVELS.DANGER].length > 5}
+                <div class="rl-more">+{previewSummary.byRiskLevel[RISK_LEVELS.DANGER].length - 5} 项更多</div>
+              {/if}
+            </div>
+          </div>
+          <div class="rl-card warning">
+            <div class="rl-title"><AlertTriangle size={16} /> 警告</div>
+            <div class="rl-count">{previewSummary.totals.warning}</div>
+            <div class="rl-list">
+              {#each previewSummary.byRiskLevel[RISK_LEVELS.WARNING].slice(0, 5) as row}
+                <button
+                  type="button"
+                  class="rl-item"
+                  on:click={() => jumpToReview(row.table, row.id, row.diffType)}
+                >
+                  <span class="rl-name">{TABLE_LABELS[row.table]}: {row.recordName}</span>
+                  {#if row.impactTotal > 0}
+                    <span class="rl-imp">{row.impactTotal}引用</span>
+                  {/if}
+                </button>
+              {/each}
+              {#if previewSummary.byRiskLevel[RISK_LEVELS.WARNING].length > 5}
+                <div class="rl-more">+{previewSummary.byRiskLevel[RISK_LEVELS.WARNING].length - 5} 项更多</div>
+              {/if}
+            </div>
+          </div>
+          <div class="rl-card info">
+            <div class="rl-title"><CheckCircle size={16} /> 提示</div>
+            <div class="rl-count">{previewSummary.totals.info}</div>
+            <div class="rl-list">
+              {#each previewSummary.byRiskLevel[RISK_LEVELS.INFO].slice(0, 5) as row}
+                <button
+                  type="button"
+                  class="rl-item"
+                  on:click={() => jumpToReview(row.table, row.id, row.diffType)}
+                >
+                  <span class="rl-name">{TABLE_LABELS[row.table]}: {row.recordName}</span>
+                </button>
+              {/each}
+              {#if previewSummary.byRiskLevel[RISK_LEVELS.INFO].length > 5}
+                <div class="rl-more">+{previewSummary.byRiskLevel[RISK_LEVELS.INFO].length - 5} 项更多</div>
+              {/if}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="preview-section">
+        <div class="section-title">
+          <Package size={16} />
+          <span>按<strong>影响引用数量</strong>分组（服装记录）</span>
+        </div>
+        <div class="impact-grid">
+          {#each ['high', 'medium', 'low', 'none'] as range}
+            {@const items = previewSummary.byImpactRange[range]}
+            {#if items.length > 0 || range === 'high' || range === 'medium'}
+              <div class="impact-card {getImpactBadgeClass(range)}">
+                <div class="imp-title">{getImpactRangeLabel(range)}</div>
+                <div class="imp-count">{items.length}</div>
+                <div class="imp-list">
+                  {#each items.slice(0, 5) as row}
+                    <button
+                      type="button"
+                      class="imp-item"
+                      on:click={() => jumpToReview(row.table, row.id, row.diffType)}
+                    >
+                      <span class="imp-name">{row.recordName}</span>
+                      {#if row.impactTotal > 0}
+                        <span class="imp-num">{row.impactTotal}</span>
+                      {/if}
+                    </button>
+                  {/each}
+                  {#if items.length > 5}
+                    <div class="rl-more">+{items.length - 5} 项更多</div>
+                  {/if}
+                </div>
+              </div>
+            {/if}
+          {/each}
+        </div>
+      </div>
+
+      <div class="preview-section batch-section">
+        <div class="section-title">
+          <Zap size={16} />
+          <span><strong>批量策略</strong> · 一键应用规则到待决项</span>
+        </div>
+        <div class="strategy-panel">
+          <div class="strategy-header">
+            <Settings2 size={16} />
+            <span>选择合并策略</span>
+          </div>
+          <div class="strategy-options">
+            {#each Object.values(BATCH_STRATEGIES) as strat}
+              <button
+                type="button"
+                class="strategy-option {selectedBatchStrategy === strat ? 'active' : ''}"
+                on:click={() => selectedBatchStrategy = strat}
+              >
+                <div class="so-title">
+                  {#if strat === BATCH_STRATEGIES.KEEP_CURRENT_ALL}
+                    <Shield size={14} />
+                  {:else if strat === BATCH_STRATEGIES.USE_IMPORT_ALL}
+                    <Download size={14} />
+                  {:else if strat === BATCH_STRATEGIES.LATEST_EVENT}
+                    <GitBranch size={14} />
+                  {:else}
+                    <Clock size={14} />
+                  {/if}
+                  {BATCH_STRATEGY_LABELS[strat]}
+                </div>
+                <div class="so-desc">
+                  {#if strat === BATCH_STRATEGIES.KEEP_CURRENT_ALL}
+                    所有待决项保留当前设备版本
+                  {:else if strat === BATCH_STRATEGIES.USE_IMPORT_ALL}
+                    所有待决项使用导入设备版本
+                  {:else if strat === BATCH_STRATEGIES.LATEST_EVENT}
+                    基于同步事件时间线自动判断
+                  {:else}
+                    基于记录 updatedAt 选较新的版本
+                  {/if}
+                </div>
+              </button>
+            {/each}
+          </div>
+
+          <div class="scope-controls">
+            <div class="scope-group">
+              <div class="scope-group-label">作用范围：按表（不选 = 全部表）</div>
+              <div class="scope-chips">
+                <button
+                  type="button"
+                  class="scope-chip {batchScope.tables === null ? 'active' : ''}"
+                  on:click={() => batchScope.tables = null}
+                >
+                  全部
+                </button>
+                {#each Object.keys(diffResult.tables) as tbl}
+                  <button
+                    type="button"
+                    class="scope-chip {batchScope.tables?.includes(tbl) ? 'active' : ''}"
+                    on:click={() => {
+                      const cur = batchScope.tables || [];
+                      batchScope.tables = cur.includes(tbl)
+                        ? cur.filter(t => t !== tbl).length === 0 ? null : cur.filter(t => t !== tbl)
+                        : [...cur, tbl];
+                    }}
+                  >
+                    {TABLE_LABELS[tbl] || tbl}
+                  </button>
+                {/each}
+              </div>
+            </div>
+            <div class="scope-group">
+              <div class="scope-group-label">作用范围：按风险级别</div>
+              <div class="scope-chips">
+                <button
+                  type="button"
+                  class="scope-chip {batchScope.riskLevels === null ? 'active' : ''}"
+                  on:click={() => batchScope.riskLevels = null}
+                >
+                  全部级别
+                </button>
+                {#each Object.keys(RISK_LEVELS) as rl}
+                  <button
+                    type="button"
+                    class="scope-chip {batchScope.riskLevels?.includes(rl) ? 'active' : ''}"
+                    on:click={() => {
+                      const cur = batchScope.riskLevels || [];
+                      batchScope.riskLevels = cur.includes(rl)
+                        ? cur.filter(r => r !== rl).length === 0 ? null : cur.filter(r => r !== rl)
+                        : [...cur, rl];
+                    }}
+                  >
+                    {RISK_LEVEL_LABELS[rl]}
+                  </button>
+                {/each}
+              </div>
+            </div>
+          </div>
+
+          <div class="batch-actions-row">
+            <button
+              type="button"
+              class="secondary"
+              on:click={() => batchResolveAll(DECISION_CHOICES.KEEP_CURRENT)}
+            >
+              <SkipForward size={14} /> 全部保留当前
+            </button>
+            <button
+              type="button"
+              on:click={handleApplyBatchStrategy}
+              class="primary-btn"
+            >
+              <Zap size={14} /> 应用选中的批量策略
+            </button>
+            <button
+              type="button"
+              class="secondary"
+              on:click={() => batchResolveAll(DECISION_CHOICES.USE_IMPORT)}
+            >
+              <SkipForward size={14} /> 全部使用导入
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <div class="preview-footer">
+        <button
+          type="button"
+          class="secondary"
+          on:click={() => goToPhase('review')}
+        >
+          <Eye size={16} /> 进入逐条审核
+        </button>
+        <button
+          type="button"
+          class={canProceed ? 'primary-btn' : 'disabled-btn'}
+          disabled={!canProceed}
+          on:click={() => goToPhase('confirm')}
+        >
+          <Shield size={16} />
+          {#if canProceed}
+            前往执行确认
+          {:else}
+            需先解决 {pendingCount} 项待决
+          {/if}
+        </button>
       </div>
     </div>
   {/if}
 
-  {#if viewMode === 'detail'}
+  {#if phase === 'review'}
   <div class="merge-summary">
     {#each TABLE_ORDER as table}
       {@const sum = diffResult.summary[table]}
@@ -1014,6 +858,7 @@
           {@const isExpanded = expandedItems.has(item.id)}
           {@const dec = decisions[activeTable]?.[item.id]}
           {@const needsDecision = activeFilter === DIFF_TYPES.FIELD_CONFLICT || activeFilter === DIFF_TYPES.DELETED_SUSPECT}
+          {@const impact = impactAnalysis?.[activeTable]?.[item.id]}
           <div class="diff-item {getFilterClass(activeFilter)} {needsDecision && (!dec || !dec.choice) ? 'needs-decision' : ''}">
             <button type="button" class="diff-header" on:click={() => toggleItem(item.id)}>
               {#if isExpanded}
@@ -1026,6 +871,11 @@
                   ? getRecordTitle(activeTable, item.imported)
                   : getRecordTitle(activeTable, item.current || item.imported)}
               </span>
+              {#if impact?.totalImpacts > 0}
+                <span class="diff-impact {getImpactBadgeClass(impact.totalImpacts >= 10 ? 'high' : (impact.totalImpacts >= 3 ? 'medium' : 'low'))}">
+                  <Users size={10} /> {impact.totalImpacts}
+                </span>
+              {/if}
               {#if needsDecision}
                 {#if dec?.choice}
                   <span class="decision-badge decision-{dec.choice}">
@@ -1052,6 +902,21 @@
                         冲突字段：{item.timelineAnalysis.conflictSources.join('、').replace('__existence__', '存在状态')}
                       </span>
                     {/if}
+                  </div>
+                {/if}
+
+                {#if impact?.totalImpacts > 0}
+                  <div class="impact-banner">
+                    <Users size={14} />
+                    <span>
+                      <strong>引用影响：</strong>
+                      共影响 <strong>{impact.totalImpacts}</strong> 处关联
+                      {#each Object.keys(impact.byType) as t}
+                        {#if impact.byType[t] > 0}
+                          <span class="impact-chip">{IMPACT_TYPE_LABELS[t]} ×{impact.byType[t]}</span>
+                        {/if}
+                      {/each}
+                    </span>
                   </div>
                 {/if}
 
@@ -1093,12 +958,42 @@
                 {:else if activeFilter === DIFF_TYPES.DELETED_SUSPECT}
                   <div class="side-by-side">
                     <div class="side side-current">
-                      <div class="side-label">当前侧有此记录</div>
+                      <div class="side-label">
+                        当前侧有此记录
+                        {#if item.current?.updatedAt}
+                          <span class="time-hint"><Clock size={10}/> {formatShortTime(item.current.updatedAt)}</span>
+                        {/if}
+                      </div>
                       <pre class="record-preview">{JSON.stringify(item.current, null, 2)}</pre>
                     </div>
                     <div class="side side-empty">
                       <div class="side-label"><Minus size={14} />导入侧无此记录（疑似删除）</div>
                       <p class="empty-hint">保留当前可防止误删。如确认是删除操作请选择"使用导入版本"。</p>
+                      {#if impact?.totalImpacts > 0}
+                        <div class="deletion-impacts">
+                          <div class="de-title"><AlertTriangle size={12}/> <strong>选择删除将影响以下内容：</strong></div>
+                          <div class="de-impact-row">
+                            {#each Object.keys(impact.byType) as t}
+                              {#if impact.byType[t] > 0}
+                                <span class="impact-chip danger">{IMPACT_TYPE_LABELS[t]} ×{impact.byType[t]}</span>
+                              {/if}
+                            {/each}
+                          </div>
+                          {#if impact.details?.length > 0}
+                            <details class="ci-details">
+                              <summary>展开关联详情（{impact.details.length}）</summary>
+                              <ul class="de-list">
+                                {#each impact.details.slice(0, 20) as det}
+                                  <li>[{IMPACT_TYPE_LABELS[det.type]}] {det.label}</li>
+                                {/each}
+                                {#if impact.details.length > 20}
+                                  <li>…以及其他 {impact.details.length - 20} 项</li>
+                                {/if}
+                              </ul>
+                            </details>
+                          {/if}
+                        </div>
+                      {/if}
                     </div>
                   </div>
                 {:else}
@@ -1107,8 +1002,18 @@
                       <thead>
                         <tr>
                           <th>字段</th>
-                          <th>当前版本</th>
-                          <th>导入版本</th>
+                          <th>
+                            当前版本
+                            {#if item.current?.updatedAt}
+                              <span class="time-hint"><Clock size={10}/> {formatShortTime(item.current.updatedAt)}</span>
+                            {/if}
+                          </th>
+                          <th>
+                            导入版本
+                            {#if item.imported?.updatedAt}
+                              <span class="time-hint"><Clock size={10}/> {formatShortTime(item.imported.updatedAt)}</span>
+                            {/if}
+                          </th>
                           {#if dec?.choice === DECISION_CHOICES.MANUAL}
                             <th>手动合并结果</th>
                           {/if}
@@ -1236,6 +1141,126 @@
   </div>
   {/if}
 
+  {#if phase === 'confirm'}
+    <div class="confirm-phase">
+      <div class="confirm-section">
+        <div class="section-title">
+          <Trash2 size={16} />
+          <span>将被<strong>删除</strong>的服装（{riskList.toDelete.length} 条）</span>
+        </div>
+        {#if riskList.toDelete.length === 0}
+          <div class="empty-note"><CheckCircle2 size={18} /> 没有删除操作</div>
+        {:else}
+          <div class="confirm-list">
+            {#each riskList.toDelete as d}
+              <div class="confirm-item danger">
+                <div class="ci-main">
+                  <AlertOctagon size={16} />
+                  <strong>{d.name}</strong>
+                  <span class="ci-id">{d.id.slice(0, 8)}</span>
+                  {#if d.isTrueDelete}<span class="ci-tag">真实删除(有墓碑)</span>{/if}
+                </div>
+                <div class="ci-impact">
+                  影响：
+                  {#each Object.keys(d.impactByType) as t}
+                    {#if d.impactByType[t] > 0}
+                      <span class="impact-chip">{IMPACT_TYPE_LABELS[t]} ×{d.impactByType[t]}</span>
+                    {/if}
+                  {/each}
+                  {#if d.impactTotal === 0}
+                    <span class="impact-chip none">无关联引用</span>
+                  {/if}
+                </div>
+                {#if d.impactDetails?.length > 0}
+                  <details class="ci-details">
+                    <summary>展开详情 ({d.impactDetails.length})</summary>
+                    <ul>
+                      {#each d.impactDetails as det}
+                        <li>[{IMPACT_TYPE_LABELS[det.type]}] {det.label}</li>
+                      {/each}
+                    </ul>
+                  </details>
+                {/if}
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+      <div class="confirm-section">
+        <div class="section-title">
+          <Link size={16} />
+          <span>ID<strong>重映射</strong>（{riskList.toRemap.length} 组）</span>
+        </div>
+        {#if riskList.toRemap.length === 0}
+          <div class="empty-note"><CheckCircle2 size={18} /> 无需 ID 重映射</div>
+        {:else}
+          <div class="confirm-list">
+            {#each riskList.toRemap as r}
+              <div class="confirm-item remap">
+                <div class="ci-main">
+                  <Unlink size={16} />
+                  <div class="remap-pair">
+                    <span class="remap-from"><strong>{r.fromName}</strong> <code>{r.fromId.slice(0, 8)}</code></span>
+                    <ArrowRight size={14} />
+                    <span class="remap-to"><strong>{r.toName}</strong> <code>{r.toId.slice(0, 8)}</code></span>
+                  </div>
+                </div>
+                <div class="ci-note">{r.reason}</div>
+              </div>
+            {/each}
+          </div>
+        {/if}
+      </div>
+
+      <div class="confirm-section">
+        <div class="section-title">
+          <AlertTriangle size={16} />
+          <span>悬空引用<strong>清理</strong>（{riskList.danglingRisk.length} 处）</span>
+        </div>
+        {#if riskList.danglingRisk.length === 0}
+          <div class="empty-note"><CheckCircle2 size={18} /> 无悬空引用</div>
+        {:else}
+          <div class="confirm-list">
+            {#each riskList.danglingRisk.slice(0, 50) as dr}
+              <div class="confirm-item dangling">
+                <div class="ci-main">
+                  <AlertTriangle size={14} />
+                  <span class="ci-table">[{TABLE_LABELS[dr.table] || dr.table}]</span>
+                  <strong>{dr.recordName}</strong>
+                  <code class="ci-field">{dr.field}</code>
+                </div>
+                <div class="ci-note">{dr.message}</div>
+              </div>
+            {/each}
+            {#if riskList.danglingRisk.length > 50}
+              <div class="more-hint">…还有 {riskList.danglingRisk.length - 50} 处引用将被清理</div>
+            {/if}
+          </div>
+        {/if}
+      </div>
+
+      <div class="confirm-totals">
+        <div class="total-box">
+          <div class="total-label">待删除服装</div>
+          <div class="total-val danger">{riskList.toDelete.length}</div>
+        </div>
+        <div class="total-box">
+          <div class="total-label">ID 重映射</div>
+          <div class="total-val remap">{riskList.toRemap.length}</div>
+        </div>
+        <div class="total-box">
+          <div class="total-label">引用清理</div>
+          <div class="total-val dangling">{riskList.danglingRisk.length}</div>
+        </div>
+        <div class="total-box">
+          <div class="total-label">决策完成度</div>
+          <div class="total-val ok">{previewSummary?.totals.needsDecision - pendingCount}/{previewSummary?.totals.needsDecision || 0}</div>
+        </div>
+      </div>
+    </div>
+  {/if}
+
   <div class="merge-footer">
     <div class="footer-left">
       {#if pendingCount > 0}
@@ -1260,12 +1285,27 @@
     </div>
     <div class="footer-actions">
       <button type="button" class="secondary" on:click={onClose}>取消</button>
+      {#if phase !== 'preview'}
+        <button type="button" class="secondary" on:click={() => goToPhase(phase === 'confirm' ? 'review' : 'preview')}>
+          {phase === 'confirm' ? '返回审核' : '返回预演'}
+        </button>
+      {/if}
       <button
         type="button"
-        on:click={handleConfirm}
-        disabled={!canProceed}
+        on:click={phase === 'confirm' ? handleConfirm : () => goToPhase(phase === 'preview' ? 'review' : 'confirm')}
+        disabled={phase === 'confirm' ? !canProceed : false}
       >
-        <RefreshCw size={16} />确认合并
+        {#if phase === 'confirm'}
+          <RefreshCw size={16} />确认合并执行
+        {:else if phase === 'preview'}
+          <Eye size={16} />下一步：逐条审核
+        {:else}
+          {#if canProceed}
+            <Shield size={16} />下一步：执行确认
+          {:else}
+            <AlertTriangle size={16} />解决 {pendingCount} 项后可继续
+          {/if}
+        {/if}
       </button>
     </div>
   </div>
@@ -1784,506 +1824,471 @@
   .sum-chip.diff-event { background: #f0eef6; color: #6a2d6a; }
   .diff-item.diff-event { border-left: 4px solid #8a4d8a; }
 
-  .view-tabs {
+  /* ========== Phase Tabs ========== */
+  .phase-tabs {
     display: flex;
-    gap: 4px;
-    padding: 8px 20px;
+    gap: 0;
+    padding: 12px 20px 0;
+    background: #faf6f0;
     border-bottom: 1px solid #e8dfd2;
-    background: #fff;
   }
-  .view-tab {
-    padding: 8px 16px;
-    border: 1px solid #e8dfd2;
-    background: #faf6f0;
-    border-radius: 6px 6px 0 0;
-    cursor: pointer;
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-family: inherit;
-    color: #6b5a4a;
-    position: relative;
-    border-bottom: none;
-  }
-  .view-tab:hover { background: #f0e6d6; }
-  .view-tab.active {
-    background: #fdf6ec;
-    color: #8a5b41;
-    border-color: #d4b896;
-    font-weight: 600;
-  }
-  .impact-badge {
-    background: #c44d4d;
-    color: #fff;
-    font-size: 10px;
-    padding: 0 6px;
-    border-radius: 8px;
-    font-weight: 600;
-    min-width: 16px;
-    text-align: center;
-  }
-
-  .preview-panel {
-    flex: 1;
-    overflow-y: auto;
-    padding: 16px 20px;
-    background: #faf6f0;
-  }
-
-  .batch-strategy-bar {
+  .phase-tab {
     display: flex;
     align-items: center;
     gap: 8px;
-    margin-bottom: 12px;
-    flex-wrap: wrap;
-  }
-  .batch-label {
-    font-size: 13px;
-    font-weight: 600;
-    color: #4a3a2a;
-  }
-  .batch-btn {
-    padding: 6px 14px;
-    border: 1px solid #d4b896;
-    background: #fff;
-    border-radius: 16px;
-    cursor: pointer;
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-family: inherit;
-    color: #4a3a2a;
-    transition: all 0.15s;
-  }
-  .batch-btn:hover {
-    background: #8a5b41;
-    color: #fff;
-    border-color: #8a5b41;
-  }
-
-  .preview-stats-bar {
-    display: flex;
-    gap: 12px;
-    padding: 12px 16px;
-    background: #fff;
-    border: 1px solid #e8dfd2;
-    border-radius: 8px;
-    margin-bottom: 12px;
-    flex-wrap: wrap;
-  }
-  .stat-item {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    min-width: 60px;
-  }
-  .stat-num {
-    font-size: 20px;
-    font-weight: 700;
-    color: #4a3a2a;
-  }
-  .stat-label {
-    font-size: 11px;
-    color: #8a7665;
-  }
-  .stat-item.stat-add .stat-num { color: #4d8a4d; }
-  .stat-item.stat-delete .stat-num { color: #c44d4d; }
-  .stat-item.stat-update .stat-num { color: #4d76a8; }
-  .stat-item.stat-conflict .stat-num { color: #d4893b; }
-  .stat-item.stat-ref .stat-num { color: #8a4d8a; }
-
-  .preview-group-tabs {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 12px;
-  }
-  .group-tab {
-    padding: 6px 14px;
-    border: 1px solid #e8dfd2;
-    background: #fff;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 12px;
-    display: flex;
-    align-items: center;
-    gap: 5px;
-    font-family: inherit;
-    color: #6b5a4a;
-  }
-  .group-tab:hover { background: #f0e6d6; }
-  .group-tab.active {
-    background: #8a5b41;
-    color: #fff;
-    border-color: #8a5b41;
-  }
-
-  .preview-groups {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .preview-group {
-    background: #fff;
-    border: 1px solid #e8dfd2;
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .group-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 10px 14px;
-    background: #fdf6ec;
+    padding: 10px 18px;
     border: none;
+    background: transparent;
     cursor: pointer;
-    text-align: left;
     font-family: inherit;
     font-size: 14px;
-    color: #4a3a2a;
+    color: #8a7665;
+    border-bottom: 2px solid transparent;
+    margin-bottom: -1px;
+    transition: all .15s ease;
   }
-  .group-header:hover { background: #f6ead8; }
-  .group-title {
-    flex: 1;
+  .phase-tab:hover { color: #5a4a3a; background: rgba(138,91,65,.06); }
+  .phase-tab.active {
+    color: #5a3a22;
+    border-bottom-color: #8a5b41;
+    background: #fff;
     font-weight: 600;
+  }
+  .phase-num {
+    width: 22px; height: 22px;
+    border-radius: 50%;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+    background: #e8dfd2;
+    color: #5a4a3a;
+  }
+  .phase-tab.active .phase-num { background: #8a5b41; color: #fff; }
+  .phase-tab.done .phase-num { background: #2d5a2d; color: #fff; }
+
+  /* ========== Preview Phase ========== */
+  .preview-phase {
+    padding: 18px 20px;
+    overflow-y: auto;
+    flex: 1;
+  }
+  .preview-section {
+    margin-bottom: 22px;
+  }
+  .section-title {
     display: flex;
     align-items: center;
     gap: 8px;
-  }
-  .group-count {
-    font-size: 12px;
-    color: #8a7665;
-    background: #f0e6d6;
-    padding: 2px 10px;
-    border-radius: 10px;
-  }
-  .group-actions {
-    display: flex;
-    gap: 6px;
-  }
-  .mini-btn {
-    padding: 4px 10px;
-    border: 1px solid #d4b896;
-    background: #fff;
-    border-radius: 4px;
-    cursor: pointer;
-    font-size: 11px;
-    font-family: inherit;
+    font-size: 15px;
+    font-weight: 600;
     color: #4a3a2a;
-  }
-  .mini-btn:hover { background: #f0e6d6; }
-  .mini-btn.primary {
-    background: #8a5b41;
-    color: #fff;
-    border-color: #8a5b41;
-  }
-  .mini-btn.primary:hover { background: #6b4430; }
-
-  .risk-dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    display: inline-block;
-  }
-  .risk-badge-critical { background: #8a1a1a; }
-  .risk-badge-high { background: #d9534f; }
-  .risk-badge-medium { background: #f0ad4e; }
-  .risk-badge-low { background: #5bc0de; }
-  .risk-badge-info { background: #777; }
-
-  .group-chips {
-    display: flex;
-    gap: 4px;
-    margin-left: auto;
-    margin-right: 8px;
+    margin-bottom: 12px;
+    padding-bottom: 8px;
+    border-bottom: 1px dashed #e0d4c2;
   }
 
-  .group-items {
-    padding: 8px 14px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
+  /* Table cards grid */
+  .table-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    gap: 12px;
   }
-  .preview-item {
+  .table-card {
+    background: #fff;
+    border: 1px solid #e8dfd2;
+    border-radius: 8px;
+    padding: 14px;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .table-card:hover { border-color: #d4a878; box-shadow: 0 2px 8px rgba(138,91,65,.08); }
+  .tc-header {
     display: flex;
     justify-content: space-between;
     align-items: center;
-    padding: 8px 12px;
-    background: #faf6f0;
-    border: 1px solid #e8dfd2;
-    border-radius: 4px;
+    margin-bottom: 10px;
+  }
+  .tc-name {
+    display: flex; align-items: center; gap: 8px;
+    font-weight: 600; color: #4a3a2a; font-size: 15px;
+  }
+  .tc-total { color: #8a7665; font-size: 13px; }
+  .tc-chips { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .tc-footer {
+    display: flex; justify-content: space-between; align-items: center;
+    padding-top: 10px; border-top: 1px solid #f0e6d6;
+    font-size: 12px; color: #8a7665;
+  }
+  .expand-hint { display: flex; align-items: center; gap: 4px; }
+
+  .tc-details {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed #f0e6d6;
+  }
+  .detail-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 4px 0;
+    font-size: 12px;
+  }
+  .dr-label { display: flex; align-items: center; gap: 6px; color: #6b5a4a; }
+  .dr-val { font-weight: 600; color: #4a3a2a; }
+
+  /* Risk list */
+  .risk-list, .impact-list {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 12px;
+  }
+  .rl-card {
+    border-radius: 8px;
+    padding: 14px;
+    border: 1px solid;
+    background: #fff;
     cursor: pointer;
-    transition: all 0.15s;
+    transition: all .15s ease;
   }
-  .preview-item:hover {
+  .rl-card:hover { transform: translateY(-1px); box-shadow: 0 3px 12px rgba(0,0,0,.06); }
+  .rl-card.danger { border-color: #e8a89c; background: linear-gradient(135deg,#fff,#fff5f2); }
+  .rl-card.warning { border-color: #e8c98a; background: linear-gradient(135deg,#fff,#fff8ea); }
+  .rl-card.info { border-color: #8ab4e8; background: linear-gradient(135deg,#fff,#f0f6ff); }
+  .rl-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 8px;
+  }
+  .rl-title {
+    display: flex; align-items: center; gap: 8px;
+    font-weight: 600; font-size: 14px;
+  }
+  .rl-card.danger .rl-title { color: #8a3a2a; }
+  .rl-card.warning .rl-title { color: #8a6a1a; }
+  .rl-card.info .rl-title { color: #2a4a7a; }
+  .rl-count { font-size: 24px; font-weight: 700; }
+  .rl-card.danger .rl-count { color: #c2482a; }
+  .rl-card.warning .rl-count { color: #c2901a; }
+  .rl-card.info .rl-count { color: #2a5a8a; }
+  .rl-sub { font-size: 12px; color: #8a7665; margin-top: 4px; }
+
+  /* Impact cards */
+  .impact-card {
+    background: #fff;
+    border: 1px solid #e8dfd2;
+    border-radius: 8px;
+    padding: 14px;
+    cursor: pointer;
+    transition: all .15s ease;
+  }
+  .impact-card:hover { border-color: #c49868; }
+  .impact-card.high .impact-range { color: #c2482a; }
+  .impact-card.medium .impact-range { color: #c2901a; }
+  .impact-card.low .impact-range { color: #2a6a4a; }
+  .impact-range {
+    font-size: 20px; font-weight: 700; margin-bottom: 4px;
+  }
+  .impact-count { font-size: 12px; color: #8a7665; margin-bottom: 8px; }
+  .impact-badges { display: flex; flex-wrap: wrap; gap: 5px; }
+
+  /* Impact chip */
+  .impact-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 8px;
+    border-radius: 10px;
     background: #f0e6d6;
-    border-color: #c9a97e;
+    color: #5a4a3a;
+    font-size: 11px;
+    font-weight: 500;
+    margin-left: 4px;
   }
-  .preview-item.decided {
-    opacity: 0.7;
-    background: #f0faf0;
+  .impact-chip.none { background: #e8e8e8; color: #8a7665; }
+  .impact-chip.danger { background: #f5d8cc; color: #8a3a2a; }
+
+  /* Strategy panel */
+  .strategy-panel {
+    background: linear-gradient(135deg,#fff8ea,#fff);
+    border: 1px solid #e8c98a;
+    border-radius: 10px;
+    padding: 16px;
   }
-  .item-main {
+  .strategy-header {
+    display: flex; align-items: center; gap: 8px;
+    font-weight: 600; color: #6a4a1a;
+    margin-bottom: 14px;
+  }
+  .strategy-options {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+    gap: 8px;
+    margin-bottom: 14px;
+  }
+  .strategy-option {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    padding: 10px 12px;
+    border: 1px solid #e0d4c2;
+    border-radius: 6px;
+    background: #fff;
+    cursor: pointer;
+    transition: all .15s ease;
+    font-family: inherit;
+    text-align: left;
+  }
+  .strategy-option:hover { border-color: #8a5b41; }
+  .strategy-option.active {
+    border-color: #8a5b41;
+    background: #fff5ec;
+    box-shadow: inset 0 0 0 2px rgba(138,91,65,.15);
+  }
+  .so-title {
+    display: flex; align-items: center; gap: 6px;
+    font-weight: 600; font-size: 13px; color: #4a3a2a;
+  }
+  .so-desc { font-size: 11px; color: #8a7665; }
+
+  .scope-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    margin-bottom: 14px;
+  }
+  .scope-group {
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .scope-group-label {
+    font-size: 12px; color: #6a5a4a; font-weight: 600;
+  }
+  .scope-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .scope-chip {
+    display: flex; align-items: center; gap: 4px;
+    padding: 4px 10px;
+    border-radius: 14px;
+    border: 1px solid #e0d4c2;
+    background: #fff;
+    cursor: pointer;
+    font-size: 12px;
+    font-family: inherit;
+    color: #5a4a3a;
+    transition: all .15s ease;
+  }
+  .scope-chip:hover { border-color: #8a5b41; }
+  .scope-chip.active {
+    background: #8a5b41;
+    border-color: #8a5b41;
+    color: #fff;
+  }
+  .scope-chip input { display: none; }
+
+  .preview-footer {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-top: 16px;
+    padding-top: 16px;
+    border-top: 1px solid #e8dfd2;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+  .pf-stats {
+    display: flex; align-items: center; gap: 14px;
+    font-size: 13px; color: #6a5a4a;
+  }
+  .pf-stat strong { color: #4a3a2a; font-size: 15px; }
+  .pf-actions { display: flex; gap: 8px; }
+
+  /* ========== Review: diff impact badge ========== */
+  .diff-impact {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+    margin-left: auto;
+  }
+  .diff-impact.impact-high { background: #f5d8cc; color: #8a3a2a; }
+  .diff-impact.impact-medium { background: #f5e8c8; color: #7a5a1a; }
+  .diff-impact.impact-low { background: #d8e8d8; color: #2a5a3a; }
+
+  .impact-banner {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 14px;
+    background: #eef3ff;
+    border-left: 3px solid #4a7ac2;
+    border-radius: 4px;
+    margin-bottom: 14px;
+    font-size: 13px;
+    color: #2a4a6a;
+  }
+  .time-hint {
+    margin-left: 6px;
+    font-size: 11px;
+    font-weight: 400;
+    color: #8a7665;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .deletion-impacts {
+    margin-top: 12px;
+    padding: 10px 12px;
+    background: #fff5f2;
+    border: 1px solid #e8c4b8;
+    border-radius: 6px;
+  }
+  .de-title {
+    font-size: 12px; color: #7a3a2a;
+    margin-bottom: 8px;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .de-impact-row { margin-bottom: 8px; }
+  .de-list {
+    margin: 0;
+    padding-left: 20px;
+    font-size: 12px;
+    color: #6a4a3a;
+  }
+  .de-list li { margin: 2px 0; }
+
+  /* ========== Confirm Phase ========== */
+  .confirm-phase {
+    padding: 18px 20px;
+    overflow-y: auto;
+    flex: 1;
+  }
+  .confirm-section {
+    margin-bottom: 22px;
+  }
+  .empty-note {
+    padding: 20px;
+    background: #f5fff5;
+    border: 1px dashed #b8dcb8;
+    border-radius: 8px;
+    color: #2a5a3a;
+    text-align: center;
     display: flex;
     align-items: center;
+    justify-content: center;
     gap: 8px;
-    flex: 1;
+    font-size: 14px;
+  }
+  .confirm-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+  .confirm-item {
+    border-radius: 8px;
+    padding: 12px 14px;
+    border: 1px solid;
+    background: #fff;
+  }
+  .confirm-item.danger { border-color: #e8a89c; background: #fff8f5; }
+  .confirm-item.remap { border-color: #c8a8e8; background: #faf5ff; }
+  .confirm-item.dangling { border-color: #e8d88a; background: #fffdf5; }
+  .ci-main {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 13px; color: #4a3a2a;
+    margin-bottom: 6px;
     flex-wrap: wrap;
   }
-  .item-table-tag {
+  .ci-id {
+    font-family: monospace;
     font-size: 11px;
-    padding: 2px 8px;
-    background: #e8dfd2;
+    color: #8a7665;
+    background: #f0e6d6;
+    padding: 1px 6px;
     border-radius: 3px;
-    color: #6b5a4a;
   }
-  .item-name {
-    font-weight: 500;
-    color: #4a3a2a;
-    font-size: 13px;
-  }
-  .item-type-tag {
-    font-size: 11px;
-    padding: 2px 8px;
-    border-radius: 10px;
-    font-weight: 500;
-  }
-  .item-meta {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-  .ref-count {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    font-size: 11px;
-    color: #8a4d8a;
-    background: #f0e6f0;
-    padding: 2px 8px;
-    border-radius: 10px;
-  }
-  .decision-tag {
-    font-size: 11px;
-    padding: 2px 10px;
-    border-radius: 10px;
-    font-weight: 500;
-  }
-  .decision-tag.decision-pending { background: #fff4e6; color: #8a5a1a; }
-  .decision-tag.decision-keep_current { background: #e6eef6; color: #1a4a8a; }
-  .decision-tag.decision-use_import { background: #e6f0e6; color: #2d5a2d; }
-  .decision-tag.decision-manual { background: #f0e6f0; color: #6a2d6a; }
-
-  .risk-mini-badge {
+  .ci-tag {
     font-size: 10px;
     padding: 2px 6px;
-    border-radius: 3px;
+    background: #c2482a;
     color: #fff;
+    border-radius: 8px;
     font-weight: 600;
   }
-
-  .impact-panel {
-    flex: 1;
-    overflow-y: auto;
-    padding: 16px 20px;
-    background: #faf6f0;
-  }
-  .impact-header {
-    margin-bottom: 12px;
-  }
-  .impact-header h3 {
-    margin: 0;
-    font-size: 16px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    color: #4a3a2a;
-  }
-
-  .impact-stats {
-    display: grid;
-    grid-template-columns: repeat(4, 1fr);
-    gap: 10px;
-    margin-bottom: 16px;
-  }
-  .impact-stat {
-    background: #fff;
-    border: 1px solid #e8dfd2;
-    border-radius: 6px;
-    padding: 12px;
-    text-align: center;
-  }
-  .impact-stat-num {
-    display: block;
-    font-size: 24px;
-    font-weight: 700;
-    margin-bottom: 4px;
-  }
-  .impact-stat-label {
-    font-size: 12px;
-    color: #8a7665;
-  }
-  .impact-stat.danger .impact-stat-num { color: #c44d4d; }
-  .impact-stat.warning .impact-stat-num { color: #d4893b; }
-  .impact-stat.info .impact-stat-num { color: #4d76a8; }
-  .impact-stat.success .impact-stat-num { color: #4d8a4d; }
-
-  .impact-detail {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-  }
-  .impact-section {
-    background: #fff;
-    border: 1px solid #e8dfd2;
-    border-radius: 6px;
-    overflow: hidden;
-  }
-  .section-header {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    width: 100%;
-    padding: 10px 14px;
-    background: #fdf6ec;
-    border: none;
-    cursor: pointer;
-    text-align: left;
-    font-family: inherit;
-    font-size: 13px;
-    font-weight: 600;
-    color: #4a3a2a;
-  }
-  .section-header:hover { background: #f6ead8; }
-  .section-header.danger { color: #8a2d2d; background: #fdecea; }
-  .section-header.warning { color: #8a5a1a; background: #fff4e6; }
-  .section-header.info { color: #1a4a8a; background: #e6eef6; }
-  .section-header.success { color: #2d5a2d; background: #e6f0e6; }
-
-  .section-items {
-    padding: 8px 14px 12px;
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-  }
-  .impact-item {
-    padding: 8px 12px;
-    border-radius: 4px;
-    border: 1px solid #e8dfd2;
-    background: #faf6f0;
-  }
-  .impact-item.risk-danger {
-    border-color: #e8c4c4;
-    background: #fdf2f2;
-  }
-  .impact-item-main {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 4px;
-  }
-  .impact-table-tag {
+  .ci-table { font-size: 11px; color: #8a7665; font-weight: 600; }
+  .ci-field {
+    font-family: monospace;
     font-size: 11px;
-    padding: 2px 8px;
-    background: #e8dfd2;
+    background: #f5e8c8;
+    padding: 1px 5px;
     border-radius: 3px;
-    color: #6b5a4a;
+    color: #6a5a1a;
   }
-  .impact-item-name {
-    font-weight: 600;
-    font-size: 13px;
-    color: #4a3a2a;
+  .ci-impact { font-size: 12px; color: #6a5a4a; }
+  .ci-note { font-size: 12px; color: #6a5a4a; }
+  .ci-details {
+    margin-top: 8px;
+    padding: 8px 0 0;
+    border-top: 1px dashed #f0e6d6;
   }
-  .impact-item-desc {
-    font-size: 12px;
-    color: #6b5a4a;
-    margin-bottom: 4px;
-  }
-  .impact-item-meta {
+  .ci-details summary {
+    cursor: pointer;
     font-size: 11px;
     color: #8a7665;
+    padding: 2px 0;
   }
-  .impact-item-meta code {
+  .ci-details summary:hover { color: #5a4a3a; }
+  .ci-details ul {
+    margin: 8px 0 0;
+    padding-left: 20px;
+    font-size: 11px;
+    color: #6a5a4a;
+    max-height: 160px;
+    overflow-y: auto;
+  }
+  .ci-details li { margin: 2px 0; }
+
+  .remap-pair {
+    display: flex; align-items: center; gap: 8px;
+    flex-wrap: wrap;
+  }
+  .remap-from, .remap-to {
+    display: flex; align-items: center; gap: 6px;
+    font-size: 13px;
+  }
+  .remap-pair code {
+    font-size: 11px;
     background: #f0e6d6;
     padding: 1px 5px;
     border-radius: 3px;
-    font-size: 10px;
-  }
-  .tombstone-tag {
-    font-size: 10px;
-    padding: 2px 6px;
-    background: #e8c4c4;
-    color: #8a2d2d;
-    border-radius: 3px;
-    font-weight: 600;
+    color: #5a4a3a;
   }
 
-  .remap-flow {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    margin-bottom: 4px;
-  }
-  .remap-from, .remap-to {
-    font-weight: 600;
-    font-size: 13px;
-    color: #4a3a2a;
-  }
-
-  .impact-summary-box {
-    background: #fff;
-    border: 1px solid #e8dfd2;
-    border-radius: 6px;
-    padding: 14px;
-    margin-top: 6px;
-  }
-  .impact-summary-box h4 {
-    margin: 0 0 10px;
-    font-size: 13px;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    color: #4a3a2a;
-  }
-  .impact-summary-grid {
-    display: grid;
-    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
-    gap: 8px;
-  }
-  .impact-summary-item {
+  .more-hint {
     text-align: center;
     padding: 8px;
-    background: #faf6f0;
-    border-radius: 4px;
+    color: #8a7665;
+    font-size: 12px;
   }
-  .impact-summary-item .num {
-    display: block;
-    font-size: 18px;
+
+  .confirm-totals {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 12px;
+    padding: 18px;
+    background: linear-gradient(135deg,#fff8ea,#fff);
+    border: 1px solid #e0d4c2;
+    border-radius: 10px;
+  }
+  .total-box { text-align: center; }
+  .total-label {
+    font-size: 12px;
+    color: #8a7665;
+    margin-bottom: 4px;
+  }
+  .total-val {
+    font-size: 24px;
     font-weight: 700;
-    color: #8a5b41;
   }
-  .impact-summary-item .label {
-    font-size: 11px;
-    color: #8a7665;
-  }
-  .impact-hint {
-    margin: 10px 0 0;
-    font-size: 11px;
-    color: #8a7665;
-    font-style: italic;
-  }
-
-  .ref-group.ref-high .group-header { border-left: 4px solid #8a4d8a; }
-  .ref-group.ref-medium .group-header { border-left: 4px solid #4d76a8; }
-  .ref-group.ref-low .group-header { border-left: 4px solid #5bc0de; }
-  .ref-group.ref-none .group-header { border-left: 4px solid #aaa; }
-
-  .risk-group.risk-badge-critical .group-header { border-left: 4px solid #8a1a1a; }
-  .risk-group.risk-badge-high .group-header { border-left: 4px solid #d9534f; }
-  .risk-group.risk-badge-medium .group-header { border-left: 4px solid #f0ad4e; }
-  .risk-group.risk-badge-low .group-header { border-left: 4px solid #5bc0de; }
-  .risk-group.risk-badge-info .group-header { border-left: 4px solid #777; }
+  .total-val.danger { color: #c2482a; }
+  .total-val.remap { color: #7a4ac2; }
+  .total-val.dangling { color: #c2901a; }
+  .total-val.ok { color: #2a6a4a; font-size: 18px; }
 </style>
