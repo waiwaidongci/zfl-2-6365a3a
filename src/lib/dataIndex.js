@@ -4662,7 +4662,7 @@ class DataIndex {
     if (!schedule) return null;
     const riskResult = this._riskCache.byScheduleId.get(scheduleId) || this.computeRisksForSchedule(scheduleId);
 
-    const getPersistedStatus = (schedId, costumeId) => {
+    const getPersistedStatus = (schedId, costumeId, suggestionKey = null) => {
       const idx = this._indexes.suggestionStatuses;
       if (costumeId) {
         const existing = idx.byScheduleAndCostume.get(`${schedId}|${costumeId}`);
@@ -4678,7 +4678,21 @@ class DataIndex {
           };
         }
       }
-      const memStatus = this._suggestionCache.appliedSuggestions.get(`${schedId}|${costumeId}`);
+      if (suggestionKey) {
+        const existing = idx.bySuggestionKey.get(suggestionKey);
+        if (existing) {
+          return {
+            status: existing.status,
+            handler: existing.handler || '',
+            note: existing.note || '',
+            appliedAt: existing.appliedAt,
+            appliedBy: existing.appliedBy,
+            appliedNote: existing.appliedNote,
+            appliedAlternativeName: existing.appliedAlternativeName
+          };
+        }
+      }
+      const memStatus = costumeId ? this._suggestionCache.appliedSuggestions.get(`${schedId}|${costumeId}`) : null;
       return { status: memStatus || 'pending', handler: '', note: '', appliedAt: null, appliedBy: null, appliedNote: null, appliedAlternativeName: null };
     };
 
@@ -4769,8 +4783,7 @@ class DataIndex {
         handler: '',
         note: '',
         createdAt: new Date().toISOString(),
-        ...(costumeId ? getPersistedStatus(scheduleId, costumeId) : { status: 'pending' }),
-        appliedAlternativeName: null
+        ...getPersistedStatus(scheduleId, costumeId)
       });
     }
     for (const risk of otherRisks) {
@@ -4807,8 +4820,7 @@ class DataIndex {
         handler: '',
         note: '',
         createdAt: new Date().toISOString(),
-        ...(risk.costumeId ? getPersistedStatus(scheduleId, risk.costumeId) : { status: 'pending' }),
-        appliedAlternativeName: null
+        ...getPersistedStatus(scheduleId, risk.costumeId, `${scheduleId}|${sugId}`)
       });
     }
     const packingLists = this.getPackingListsForSchedule(schedule.id);
@@ -4852,11 +4864,7 @@ class DataIndex {
             handler: '',
             note: '',
             createdAt: new Date().toISOString(),
-            status: 'pending',
-            appliedAt: null,
-            appliedBy: null,
-            appliedNote: null,
-            appliedAlternativeName: null
+            ...getPersistedStatus(schedule.id, null, `${schedule.id}|${sugId}`)
           });
         }
       }
