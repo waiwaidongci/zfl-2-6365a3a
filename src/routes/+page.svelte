@@ -345,7 +345,7 @@
 
     try {
       await tick();
-      const results = await runPerformanceTests(globalIndex);
+      const results = await runPerformanceTests();
       performanceTestResults = {
         ...performanceTestResults,
         ...results
@@ -1645,21 +1645,21 @@
     </div>
     <div class="stats">
       <b><Shirt size={18} />{costumes.length}件服装</b>
-      <b><Clock size={18} />{borrowedCount}件借出</b>
-      <b><CalendarDays size={18} />{activeReservationCount}个预约</b>
-      <b><Archive size={18} />{cleanWaitCount}件待清洗</b>
+      <b><Clock size={18} />{$borrowedCount}件借出</b>
+      <b><CalendarDays size={18} />{$activeReservationCount}个预约</b>
+      <b><Archive size={18} />{$cleanWaitCount}件待清洗</b>
       <b><Package size={18} />{packingLists.length}个装箱单</b>
       <b><ClipboardList size={18} />{inventoryTasks.length}次盘点</b>
-      <b><LayoutGrid size={18} />{scheduleCount}条排期</b>
-      <b class:danger={overdueCount > 0}><AlertTriangle size={18} />{overdueCount}项逾期</b>
+      <b><LayoutGrid size={18} />{$scheduleCount}条排期</b>
+      <b class:danger={$overdueCount > 0}><AlertTriangle size={18} />{$overdueCount}项逾期</b>
       <button type="button" class="hero-data-btn" on:click={openDataManager}>
         <Database size={16} />数据管理
       </button>
       <button type="button" class="hero-data-btn" on:click={() => showScheduleKanban = !showScheduleKanban}>
         <LayoutGrid size={16} />排期看板
       </button>
-      <button type="button" class="hero-data-btn hero-risk-btn" class:has-risk={riskStats.pending > 0 || riskStats.high > 0} on:click={() => showRiskCenter = !showRiskCenter}>
-        <AlertTriangle size={16} />风险中心{#if riskStats.pending > 0}<span class="hero-risk-badge">{riskStats.pending}</span>{/if}
+      <button type="button" class="hero-data-btn hero-risk-btn" class:has-risk={$riskStats.pending > 0 || $riskStats.high > 0} on:click={() => showRiskCenter = !showRiskCenter}>
+        <AlertTriangle size={16} />风险中心{#if $riskStats.pending > 0}<span class="hero-risk-badge">{$riskStats.pending}</span>{/if}
       </button>
       <button type="button" class="hero-data-btn" on:click={() => showPerformancePanel = !showPerformancePanel}>
         <Zap size={16} />性能测试
@@ -1684,28 +1684,28 @@
         <div class="stat-card stat-pending">
           <div class="stat-icon"><Droplets size={24} /></div>
           <div class="stat-content">
-            <div class="stat-number">{pendingWorkOrderCount}</div>
+            <div class="stat-number">{$pendingWorkOrderCount}</div>
             <div class="stat-label">待处理工单</div>
           </div>
         </div>
         <div class="stat-card stat-progress">
           <div class="stat-icon"><Wrench size={24} /></div>
           <div class="stat-content">
-            <div class="stat-number">{inProgressWorkOrderCount}</div>
+            <div class="stat-number">{$inProgressWorkOrderCount}</div>
             <div class="stat-label">处理中</div>
           </div>
         </div>
         <div class="stat-card stat-done">
           <div class="stat-icon"><CheckCircle size={24} /></div>
           <div class="stat-content">
-            <div class="stat-number">{completedWorkOrderCount}</div>
+            <div class="stat-number">{$completedWorkOrderCount}</div>
             <div class="stat-label">已完成</div>
           </div>
         </div>
-        <div class="stat-card stat-overdue" class:has-overdue={overdueWorkOrderCount > 0}>
+        <div class="stat-card stat-overdue" class:has-overdue={$overdueWorkOrderCount > 0}>
           <div class="stat-icon"><AlertTriangle size={24} /></div>
           <div class="stat-content">
-            <div class="stat-number">{overdueWorkOrderCount}</div>
+            <div class="stat-number">{$overdueWorkOrderCount}</div>
             <div class="stat-label">逾期工单</div>
           </div>
         </div>

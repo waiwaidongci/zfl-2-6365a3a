@@ -14,6 +14,7 @@ import {
   TASK_STATUS
 } from './constants.js';
 import { setAll, getDB, saveDB, initializeDatabase, TABLES } from './database.js';
+import { DataIndex } from './dataIndex.js';
 
 function randomInt(min, max) {
   return Math.floor(Math.random() * (max - min + 1)) + min;
@@ -446,25 +447,33 @@ export async function generateSampleData(config = {}) {
   };
 }
 
-export async function runPerformanceTests(index) {
+export async function runPerformanceTests() {
   const results = {};
 
+  const sourceDb = getDB();
+
+  const testIndex = new DataIndex();
+
+  const fullBuildStart = performance.now();
+  testIndex.build(sourceDb);
+  const fullBuildTime = performance.now() - fullBuildStart;
+
   const searchStart = performance.now();
-  let searchResult = index.search('costumes', '天鹅裙');
+  let searchResult = testIndex.search(TABLES.costumes, '天鹅裙');
   const searchSingle = performance.now() - searchStart;
 
   const queries = ['白色', '天鹅', 'M号', 'A区', '李明'];
   let totalSearchTime = 0;
   for (const q of queries) {
     const t0 = performance.now();
-    index.search('costumes', q);
+    testIndex.search(TABLES.costumes, q);
     totalSearchTime += performance.now() - t0;
   }
   const searchAvg = totalSearchTime / queries.length;
 
   const bulkSearchStart = performance.now();
   for (let i = 0; i < 100; i++) {
-    index.search('costumes', `测试${i}`);
+    testIndex.search(TABLES.costumes, `测试${i}`);
   }
   const searchBulk = performance.now() - bulkSearchStart;
 
@@ -476,18 +485,18 @@ export async function runPerformanceTests(index) {
   };
 
   const filterByPlayStart = performance.now();
-  const byPlay = index.filterCostumes({ playFilter: '天鹅湖' });
+  const byPlay = testIndex.filterCostumes({ play: '天鹅湖' });
   const filterByPlay = performance.now() - filterByPlayStart;
 
   const filterByStatusStart = performance.now();
-  const byStatus = index.filterCostumes({ statusFilter: '借出' });
+  const byStatus = testIndex.filterCostumes({ status: '借出' });
   const filterByStatus = performance.now() - filterByStatusStart;
 
   const filterCombinedStart = performance.now();
-  const combined = index.filterCostumes({
+  const combined = testIndex.filterCostumes({
     query: '公主',
-    playFilter: '天鹅湖',
-    statusFilter: '在库'
+    play: '天鹅湖',
+    status: '在库'
   });
   const filterCombined = performance.now() - filterCombinedStart;
 
@@ -501,12 +510,12 @@ export async function runPerformanceTests(index) {
   };
 
   const riskFullStart = performance.now();
-  const allRisks = index.computeAllRisks(true);
+  const allRisks = testIndex.computeAllRisks(true);
   const riskFullCompute = performance.now() - riskFullStart;
 
   const riskDailyStart = performance.now();
   const today = new Date().toISOString().slice(0, 10);
-  const dailyRisks = index.getRisksByDate(today);
+  const dailyRisks = testIndex.getRisksByDate(today);
   const riskDailyCompute = performance.now() - riskDailyStart;
 
   results.risks = {
@@ -517,16 +526,16 @@ export async function runPerformanceTests(index) {
   };
 
   const inventoryTaskStart = performance.now();
-  const tasks = index.getAllInventoryTasks();
+  const tasks = testIndex.getAllInventoryTasks();
   let firstTaskStats = null;
   if (tasks.length > 0) {
-    firstTaskStats = index.getInventoryTaskStatsCached(tasks[0].id);
+    firstTaskStats = testIndex.getInventoryTaskStatsCached(tasks[0].id);
   }
   const inventorySingleTask = performance.now() - inventoryTaskStart;
 
   const inventoryDiscStart = performance.now();
   if (tasks.length > 0) {
-    index.getInventoryDiscrepancyItems(tasks[0].id);
+    testIndex.getInventoryDiscrepancyItems(tasks[0].id);
   }
   const inventoryDiscrepancies = performance.now() - inventoryDiscStart;
 
@@ -536,22 +545,22 @@ export async function runPerformanceTests(index) {
     taskCount: tasks?.length || 0
   };
 
-  const allCostumes = index.getActiveCostumes();
+  const allCostumes = testIndex.getActiveCostumes();
   let firstCostumeId = allCostumes.length > 0 ? allCostumes[0].id : null;
 
   const costumeToSchedulesStart = performance.now();
-  const costumeSchedules = firstCostumeId ? index.getSchedulesForCostume(firstCostumeId) : [];
+  const costumeSchedules = firstCostumeId ? testIndex.getSchedulesForCostume(firstCostumeId) : [];
   const costumeToSchedules = performance.now() - costumeToSchedulesStart;
 
   const costumeToWorkOrdersStart = performance.now();
-  const costumeWorkOrders = firstCostumeId ? index.getWorkOrdersForCostume(firstCostumeId) : [];
+  const costumeWorkOrders = firstCostumeId ? testIndex.getWorkOrdersForCostume(firstCostumeId) : [];
   const costumeToWorkOrders = performance.now() - costumeToWorkOrdersStart;
 
-  const allSchedules = index.getAllSchedules();
+  const allSchedules = testIndex.getAllSchedules();
   let firstScheduleId = allSchedules.length > 0 ? allSchedules[0].id : null;
 
   const scheduleToCostumesStart = performance.now();
-  const scheduleCostumes = firstScheduleId ? index.getCostumesForSchedule(firstScheduleId) : [];
+  const scheduleCostumes = firstScheduleId ? testIndex.getCostumesForSchedule(firstScheduleId) : [];
   const scheduleToCostumes = performance.now() - scheduleToCostumesStart;
 
   results.relations = {
@@ -563,22 +572,22 @@ export async function runPerformanceTests(index) {
     scheduleCostumeCount: scheduleCostumes?.length || 0
   };
 
-  const stats = index.getPerformanceStats();
+  const stats = testIndex.getPerformanceStats();
   const singleUpdateStart = performance.now();
   if (allCostumes.length > 0) {
     const costume = allCostumes[0];
-    index.invalidateAffectedRisks('costumes', costume);
+    testIndex.invalidateAffectedRisks(TABLES.costumes, costume);
   }
   const incrementalUpdate = performance.now() - singleUpdateStart;
 
-  const fullRebuildStart = performance.now();
-  const db = { tables: { costumes: allCostumes } };
-  index.build(db);
-  const fullRebuild = performance.now() - fullRebuildStart;
+  const rebuildStart = performance.now();
+  testIndex.build(sourceDb);
+  const fullRebuild = performance.now() - rebuildStart;
 
   results.incremental = {
     singleUpdate: incrementalUpdate,
     fullRebuild,
+    initialBuild: fullBuildTime,
     buildCount: stats?.buildCount || 0,
     incrementalUpdates: stats?.incrementalUpdates || 0
   };
@@ -593,7 +602,7 @@ export async function runPerformanceTests(index) {
 
   results.summary = `总测试时间：${totalTime.toFixed(2)}ms，风险计算：${riskFullCompute.toFixed(2)}ms，搜索：${searchSingle.toFixed(2)}ms，过滤：${filterCombined.toFixed(2)}ms`;
 
-  results.indexStats = index.getPerformanceStats();
+  results.indexStats = testIndex.getPerformanceStats();
 
   return results;
 }
