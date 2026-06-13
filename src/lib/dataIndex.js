@@ -1,4 +1,4 @@
-import { TABLES, SOFT_DELETE_TABLES } from '$lib/database.js';
+import { TABLES, SOFT_DELETE_TABLES, insertOne, updateOne } from '$lib/database.js';
 import { readable, derived } from 'svelte/store';
 
 export const RISK_STATUS = {
@@ -257,6 +257,13 @@ class DataIndex {
         byRiskKey: new Map(),
         byStatus: new Map()
       },
+      suggestionStatuses: {
+        byId: new Map(),
+        bySuggestionKey: new Map(),
+        byScheduleId: new Map(),
+        byScheduleAndCostume: new Map(),
+        byStatus: new Map()
+      },
       events: {
         byId: new Map(),
         byTable: new Map(),
@@ -504,6 +511,7 @@ class DataIndex {
     this._buildInventoryTaskIndex(tables[TABLES.inventoryTasks] || []);
     this._buildInventoryItemIndex(tables[TABLES.inventoryItems] || []);
     this._buildRiskStatusIndex(tables[TABLES.riskStatuses] || []);
+    this._buildSuggestionStatusIndex(tables[TABLES.suggestionStatuses] || []);
     this._buildEventIndex(tables[TABLES.events] || []);
     this._buildTombstoneIndex(tables[TABLES.tombstones] || []);
 
@@ -526,6 +534,7 @@ class DataIndex {
       inventoryTasks: this._indexes.inventoryTasks.byId.size,
       inventoryItems: this._indexes.inventoryItems.byId.size,
       riskStatuses: this._indexes.riskStatuses.byId.size,
+      suggestionStatuses: this._indexes.suggestionStatuses.byId.size,
       events: this._indexes.events.byId.size,
       tombstones: this._indexes.tombstones.byId.size
     };
@@ -729,6 +738,28 @@ class DataIndex {
         idx.byRiskKey.set(r.riskKey, r);
       }
       this._addToMap(idx.byStatus, r.status || '', r);
+    }
+  }
+
+  _buildSuggestionStatusIndex(records) {
+    const idx = this._indexes.suggestionStatuses;
+    this._suggestionCache.appliedSuggestions.clear();
+    for (const r of records) {
+      if (!r || !r.id) continue;
+      idx.byId.set(r.id, r);
+      if (r.suggestionKey) {
+        idx.bySuggestionKey.set(r.suggestionKey, r);
+      }
+      if (r.scheduleId) {
+        this._addToMap(idx.byScheduleId, r.scheduleId, r);
+      }
+      if (r.scheduleId && r.costumeId) {
+        idx.byScheduleAndCostume.set(`${r.scheduleId}|${r.costumeId}`, r);
+      }
+      this._addToMap(idx.byStatus, r.status || '', r);
+      if (r.scheduleId && r.costumeId && r.status) {
+        this._suggestionCache.appliedSuggestions.set(`${r.scheduleId}|${r.costumeId}`, r.status);
+      }
     }
   }
 
@@ -1062,6 +1093,12 @@ class DataIndex {
         affected.add(record.id);
         break;
       }
+      case TABLES.suggestionStatuses: {
+        if (record.scheduleId) {
+          affected.add(record.scheduleId);
+        }
+        break;
+      }
     }
 
     return affected;
@@ -1290,6 +1327,7 @@ class DataIndex {
       case TABLES.inventoryTasks: return this._inventoryTaskHandlers();
       case TABLES.inventoryItems: return this._inventoryItemHandlers();
       case TABLES.riskStatuses: return this._riskStatusHandlers();
+      case TABLES.suggestionStatuses: return this._suggestionStatusHandlers();
       case TABLES.events: return this._eventHandlers();
       case TABLES.tombstones: return this._tombstoneHandlers();
       default: return null;
@@ -1762,6 +1800,52 @@ class DataIndex {
       remove: (r) => {
         idx.byId.delete(r.id);
         if (r.riskKey) idx.byRiskKey.delete(r.riskKey);
+        self._removeFromMap(idx.byStatus, r.status || '', (v) => v.id === r.id);
+      }
+    };
+  }
+
+  _suggestionStatusHandlers() {
+    const self = this;
+    const idx = this._indexes.suggestionStatuses;
+    return {
+      add: (r) => {
+        idx.byId.set(r.id, r);
+        if (r.suggestionKey) idx.bySuggestionKey.set(r.suggestionKey, r);
+        if (r.scheduleId) self._addToMap(idx.byScheduleId, r.scheduleId, r);
+        if (r.scheduleId && r.costumeId) {
+          idx.byScheduleAndCostume.set(`${r.scheduleId}|${r.costumeId}`, r);
+          self._suggestionCache.appliedSuggestions.set(`${r.scheduleId}|${r.costumeId}`, r.status);
+        }
+        self._addToMap(idx.byStatus, r.status || '', r);
+      },
+      update: (oldR, newR) => {
+        if (oldR) {
+          if (oldR.suggestionKey) idx.bySuggestionKey.delete(oldR.suggestionKey);
+          if (oldR.scheduleId) self._removeFromMap(idx.byScheduleId, oldR.scheduleId, (v) => v.id === oldR.id);
+          if (oldR.scheduleId && oldR.costumeId) {
+            idx.byScheduleAndCostume.delete(`${oldR.scheduleId}|${oldR.costumeId}`);
+            self._suggestionCache.appliedSuggestions.delete(`${oldR.scheduleId}|${oldR.costumeId}`);
+          }
+          self._removeFromMap(idx.byStatus, oldR.status || '', (v) => v.id === oldR.id);
+        }
+        idx.byId.set(newR.id, newR);
+        if (newR.suggestionKey) idx.bySuggestionKey.set(newR.suggestionKey, newR);
+        if (newR.scheduleId) self._addToMap(idx.byScheduleId, newR.scheduleId, newR);
+        if (newR.scheduleId && newR.costumeId) {
+          idx.byScheduleAndCostume.set(`${newR.scheduleId}|${newR.costumeId}`, newR);
+          self._suggestionCache.appliedSuggestions.set(`${newR.scheduleId}|${newR.costumeId}`, newR.status);
+        }
+        self._addToMap(idx.byStatus, newR.status || '', newR);
+      },
+      remove: (r) => {
+        idx.byId.delete(r.id);
+        if (r.suggestionKey) idx.bySuggestionKey.delete(r.suggestionKey);
+        if (r.scheduleId) self._removeFromMap(idx.byScheduleId, r.scheduleId, (v) => v.id === r.id);
+        if (r.scheduleId && r.costumeId) {
+          idx.byScheduleAndCostume.delete(`${r.scheduleId}|${r.costumeId}`);
+          self._suggestionCache.appliedSuggestions.delete(`${r.scheduleId}|${r.costumeId}`);
+        }
         self._removeFromMap(idx.byStatus, r.status || '', (v) => v.id === r.id);
       }
     };
@@ -2649,6 +2733,15 @@ class DataIndex {
       }
       case TABLES.riskStatuses: {
         this._riskCache.dirty = true;
+        this._dirtyScheduleIds = null;
+        return;
+      }
+      case TABLES.suggestionStatuses: {
+        if (record.scheduleId) {
+          affectedScheduleIds.add(record.scheduleId);
+          this._suggestionCache.byScheduleId.delete(record.scheduleId);
+        }
+        this._suggestionCache.dirty = true;
         this._dirtyScheduleIds = null;
         return;
       }
@@ -4568,6 +4661,27 @@ class DataIndex {
     const schedule = this.getScheduleById(scheduleId);
     if (!schedule) return null;
     const riskResult = this._riskCache.byScheduleId.get(scheduleId) || this.computeRisksForSchedule(scheduleId);
+
+    const getPersistedStatus = (schedId, costumeId) => {
+      const idx = this._indexes.suggestionStatuses;
+      if (costumeId) {
+        const existing = idx.byScheduleAndCostume.get(`${schedId}|${costumeId}`);
+        if (existing) {
+          return {
+            status: existing.status,
+            handler: existing.handler || '',
+            note: existing.note || '',
+            appliedAt: existing.appliedAt,
+            appliedBy: existing.appliedBy,
+            appliedNote: existing.appliedNote,
+            appliedAlternativeName: existing.appliedAlternativeName
+          };
+        }
+      }
+      const memStatus = this._suggestionCache.appliedSuggestions.get(`${schedId}|${costumeId}`);
+      return { status: memStatus || 'pending', handler: '', note: '', appliedAt: null, appliedBy: null, appliedNote: null, appliedAlternativeName: null };
+    };
+
     const highRiskCostumes = new Map();
     const otherRisks = [];
     for (const risk of riskResult.risks) {
@@ -4639,7 +4753,7 @@ class DataIndex {
           sizeMatchLevel: a.sizeMatch?.label || '',
           borrowFrequency: a.borrowCount,
           lastBorrowAt: a.lastBorrowAt,
-          crossPlay: a.costume.play !== originalCostume.play,
+          crossPlay: a.costume.play !== entry.costume.play,
           availabilityReasons: a.availability?.reasons || [],
           isRecommended: a === alternatives[0],
           costume: a.costume
@@ -4655,10 +4769,7 @@ class DataIndex {
         handler: '',
         note: '',
         createdAt: new Date().toISOString(),
-        status: this._suggestionCache.appliedSuggestions.get(`${scheduleId}|${costumeId}`) || 'pending',
-        appliedAt: null,
-        appliedBy: null,
-        appliedNote: null,
+        ...(costumeId ? getPersistedStatus(scheduleId, costumeId) : { status: 'pending' }),
         appliedAlternativeName: null
       });
     }
@@ -4696,10 +4807,7 @@ class DataIndex {
         handler: '',
         note: '',
         createdAt: new Date().toISOString(),
-        status: risk.costumeId ? (this._suggestionCache.appliedSuggestions.get(`${scheduleId}|${risk.costumeId}`) || 'pending') : 'pending',
-        appliedAt: null,
-        appliedBy: null,
-        appliedNote: null,
+        ...(risk.costumeId ? getPersistedStatus(scheduleId, risk.costumeId) : { status: 'pending' }),
         appliedAlternativeName: null
       });
     }
@@ -4876,6 +4984,64 @@ class DataIndex {
     return results;
   }
 
+  _saveSuggestionStatus(suggestion, {
+    status,
+    handler = '',
+    note = '',
+    appliedAlternativeId = null,
+    appliedAlternativeName = null,
+    appliedAction = null
+  } = {}) {
+    const scheduleId = suggestion.scheduleId;
+    const costumeId = suggestion.costumeId;
+    const suggestionKey = costumeId
+      ? `${scheduleId}|${costumeId}`
+      : `${scheduleId}|${suggestion.id || suggestion.suggestionId}`;
+    const now = new Date().toISOString();
+    const idx = this._indexes.suggestionStatuses;
+    let existing = null;
+    if (suggestionKey) {
+      existing = idx.bySuggestionKey.get(suggestionKey);
+    }
+    const data = {
+      id: existing?.id || crypto.randomUUID(),
+      suggestionKey,
+      scheduleId,
+      costumeId: costumeId || null,
+      status,
+      handler: handler || suggestion.handler || '',
+      note: note || suggestion.note || '',
+      appliedAt: now,
+      appliedBy: handler || '系统',
+      appliedAlternativeId,
+      appliedAlternativeName: appliedAlternativeName || null,
+      appliedAction: appliedAction || null,
+      createdAt: existing?.createdAt || now,
+      updatedAt: now
+    };
+    if (existing) {
+      updateOne(TABLES.suggestionStatuses, existing.id, data);
+      idx.byId.set(existing.id, data);
+    } else {
+      insertOne(TABLES.suggestionStatuses, data);
+      idx.byId.set(data.id, data);
+    }
+    if (suggestionKey) {
+      idx.bySuggestionKey.set(suggestionKey, data);
+    }
+    if (scheduleId) {
+      this._addToMap(idx.byScheduleId, scheduleId, data);
+    }
+    if (scheduleId && costumeId) {
+      idx.byScheduleAndCostume.set(`${scheduleId}|${costumeId}`, data);
+    }
+    this._addToMap(idx.byStatus, status, data);
+    if (scheduleId && costumeId) {
+      this._suggestionCache.appliedSuggestions.set(`${scheduleId}|${costumeId}`, status);
+    }
+    return data;
+  }
+
   applyScheduleSuggestion(suggestionId, {
     applyAlternative = null,
     applyAction = null,
@@ -4890,12 +5056,14 @@ class DataIndex {
     if (!schedule) return { ok: false, error: '排期不存在' };
     const result = { ok: true, updates: [], warnings: [], scheduleUpdates: null, packingUpdates: [] };
     let appliedAltName = null;
+    let appliedAltId = null;
     if (applyAlternative) {
       const alt = suggestion.alternatives.find(a => a.costumeId === applyAlternative || (a.costume && a.costume.id === applyAlternative));
       if (!alt) return { ok: false, error: '替代服装不存在' };
       const oldCostumeId = suggestion.costumeId;
       const newCostumeId = alt.costumeId || (alt.costume && alt.costume.id);
       appliedAltName = alt.name || (alt.costume && alt.costume.name);
+      appliedAltId = newCostumeId;
       if (oldCostumeId && newCostumeId && schedule.linkedCostumeIds?.includes(oldCostumeId)) {
         const newLinked = [...schedule.linkedCostumeIds];
         const idx = newLinked.indexOf(oldCostumeId);
@@ -4959,6 +5127,14 @@ class DataIndex {
     suggestion.handler = handler || suggestion.handler || '';
     suggestion.appliedNote = note || (applyAction?.label || '') + (applyAlternative ? `；替换为「${appliedAltName || applyAlternative}」` : '');
     suggestion.appliedAlternativeName = appliedAltName || null;
+    this._saveSuggestionStatus(suggestion, {
+      status: 'applied',
+      handler,
+      note,
+      appliedAlternativeId: appliedAltId,
+      appliedAlternativeName: appliedAltName,
+      appliedAction: applyAction?.label || null
+    });
     if (suggestion.costumeId) {
       this._suggestionCache.appliedSuggestions.set(`${schedule.id}|${suggestion.costumeId}`, 'applied');
     }
@@ -4983,6 +5159,15 @@ class DataIndex {
     suggestion.appliedNote = note || '已确认建议并人工处理';
     suggestion.handler = handler || suggestion.handler || '';
     suggestion.note = note || suggestion.note || '';
+    this._saveSuggestionStatus(suggestion, {
+      status: 'confirmed',
+      handler,
+      note,
+      appliedAction: '仅确认建议'
+    });
+    if (suggestion.scheduleId && suggestion.costumeId) {
+      this._suggestionCache.appliedSuggestions.set(`${suggestion.scheduleId}|${suggestion.costumeId}`, 'confirmed');
+    }
     this._suggestionCache.dirty = true;
     this.invalidateSuggestions([suggestion.scheduleId]);
     return { ok: true, suggestion };
@@ -4998,6 +5183,15 @@ class DataIndex {
     suggestion.appliedNote = note || '暂缓处理';
     suggestion.handler = handler || suggestion.handler || '';
     suggestion.note = note || suggestion.note || '';
+    this._saveSuggestionStatus(suggestion, {
+      status: 'deferred',
+      handler,
+      note,
+      appliedAction: '暂缓处理'
+    });
+    if (suggestion.scheduleId && suggestion.costumeId) {
+      this._suggestionCache.appliedSuggestions.set(`${suggestion.scheduleId}|${suggestion.costumeId}`, 'deferred');
+    }
     this._suggestionCache.dirty = true;
     this.invalidateSuggestions([suggestion.scheduleId]);
     return { ok: true, suggestion };

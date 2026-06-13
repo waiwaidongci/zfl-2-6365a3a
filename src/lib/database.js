@@ -1,7 +1,7 @@
 import globalIndex from '$lib/dataIndex.js';
 
 const DB_KEY = 'zfl-2-database';
-const DB_VERSION = 9;
+const DB_VERSION = 10;
 
 const TABLES = {
   costumes: 'costumes',
@@ -14,6 +14,7 @@ const TABLES = {
   inventoryTasks: 'inventoryTasks',
   inventoryItems: 'inventoryItems',
   riskStatuses: 'riskStatuses',
+  suggestionStatuses: 'suggestionStatuses',
   syncEvents: 'syncEvents',
   tombstones: 'tombstones'
 };
@@ -29,6 +30,7 @@ const TABLE_LABELS = {
   inventoryTasks: '盘点任务',
   inventoryItems: '盘点明细',
   riskStatuses: '风险处理状态',
+  suggestionStatuses: '调配建议状态',
   syncEvents: '同步事件日志',
   tombstones: '删除墓碑记录'
 };
@@ -81,7 +83,8 @@ const TRACKED_TABLES = new Set([
   TABLES.schedules,
   TABLES.inventoryTasks,
   TABLES.inventoryItems,
-  TABLES.riskStatuses
+  TABLES.riskStatuses,
+  TABLES.suggestionStatuses
 ]);
 
 const LEGACY_KEYS = {
@@ -125,6 +128,7 @@ function createEmptyDatabase() {
       [TABLES.inventoryTasks]: [],
       [TABLES.inventoryItems]: [],
       [TABLES.riskStatuses]: [],
+      [TABLES.suggestionStatuses]: [],
       [TABLES.syncEvents]: [],
       [TABLES.tombstones]: []
     }
@@ -325,6 +329,13 @@ function migrate_v8_to_v9(db) {
   return db;
 }
 
+function migrate_v9_to_v10(db) {
+  if (!db.tables[TABLES.suggestionStatuses]) {
+    db.tables[TABLES.suggestionStatuses] = [];
+  }
+  return db;
+}
+
 const MIGRATIONS = {
   1: migrate_v1_to_v2,
   2: migrate_v2_to_v3,
@@ -333,7 +344,8 @@ const MIGRATIONS = {
   5: migrate_v5_to_v6,
   6: migrate_v6_to_v7,
   7: migrate_v7_to_v8,
-  8: migrate_v8_to_v9
+  8: migrate_v8_to_v9,
+  9: migrate_v9_to_v10
 };
 
 function runMigrations(db) {
