@@ -46,16 +46,17 @@ export const REFERENCE_FIELDS = {
 export const MERGE_TABLES = [
   TABLES.costumes,
   TABLES.actors,
+  TABLES.records,
   TABLES.reservations,
   TABLES.workOrders,
   TABLES.packingLists,
-  TABLES.schedules
+  TABLES.schedules,
+  TABLES.inventoryTasks,
+  TABLES.inventoryItems,
+  TABLES.riskStatuses
 ];
 
 export const AUTO_MERGE_TABLES = [
-  TABLES.records,
-  TABLES.inventoryTasks,
-  TABLES.inventoryItems,
   TABLES.syncEvents
 ];
 
@@ -469,8 +470,8 @@ export function createDefaultDecisions(diffResult) {
         choice = DECISION_CHOICES.MANUAL;
         merged = mergeBothSides(item.current, item.imported, item.fieldConflicts, item.timelineAnalysis);
         decisions[table][item.id] = {
-          choice: null,
-          mergedData: merged,
+          choice,
+          mergedData: deepClone(merged),
           suggestedChoice: DECISION_CHOICES.MANUAL,
           autoMergedData: deepClone(merged),
           autoReason: item.timelineAnalysis.autoReason

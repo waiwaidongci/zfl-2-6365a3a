@@ -51,6 +51,7 @@ export const EVENT_TYPE_LABELS = {
 
 const TRACKED_TABLES = new Set([
   TABLES.costumes,
+  TABLES.records,
   TABLES.reservations,
   TABLES.workOrders,
   TABLES.actors,
@@ -476,6 +477,12 @@ export function setAll(table, data) {
   const db = getDB();
   const oldData = Array.isArray(db.tables[table]) ? deepClone(db.tables[table]) : [];
   const newData = Array.isArray(data) ? deepClone(data) : [];
+  const now = new Date().toISOString();
+  for (const rec of newData) {
+    if (!rec.id) rec.id = crypto.randomUUID();
+    if (!rec.createdAt) rec.createdAt = now;
+    rec.updatedAt = now;
+  }
   db.tables[table] = newData;
   if (TRACKED_TABLES.has(table)) {
     const oldMap = new Map(oldData.map((r) => [r.id, r]));
