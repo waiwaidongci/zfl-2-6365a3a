@@ -102,6 +102,19 @@ class DataIndex {
     this._subscribers = new Set();
     this._syncQueue = [];
     this._dirtyScheduleIds = null;
+    this._suggestionCache = {
+      dirty: true,
+      byScheduleId: new Map(),
+      byCostumeId: new Map(),
+      byPlay: new Map(),
+      byStatus: new Map(),
+      allSuggestions: [],
+      lastBuildTime: 0,
+      computationCount: 0,
+      appliedSuggestions: new Map()
+    };
+    this._stats.suggestionComputationTime = 0;
+    this._stats.suggestionCount = 0;
     this._relationIndex = {
       costumeToSchedules: new Map(),
       costumeToReservations: new Map(),
@@ -281,6 +294,7 @@ class DataIndex {
   invalidate() {
     this._invalidated = true;
     this._riskCache.dirty = true;
+    this._suggestionCache.dirty = true;
     this._dirtyScheduleIds = null;
     this.invalidateFilterCaches();
     this.invalidateSummaryCache();
@@ -289,8 +303,21 @@ class DataIndex {
 
   invalidateRisks() {
     this._riskCache.dirty = true;
+    this._suggestionCache.dirty = true;
     this._dirtyScheduleIds = null;
     this.invalidateFilterCaches();
+    this.notify();
+  }
+
+  invalidateSuggestions(scheduleIds = null) {
+    this._suggestionCache.dirty = true;
+    if (scheduleIds) {
+      for (const sid of scheduleIds) {
+        this._suggestionCache.byScheduleId.delete(sid);
+      }
+    } else {
+      this._suggestionCache.byScheduleId.clear();
+    }
     this.notify();
   }
 
@@ -962,6 +989,7 @@ class DataIndex {
                                            this._batchChanges.updated.size +
                                            this._batchChanges.removed.size;
       this._riskCache.dirty = true;
+      this._suggestionCache.dirty = true;
       this._summaryCache.dirty = true;
       this.invalidateFilterCaches();
       this.invalidateSummaryCache();
@@ -971,6 +999,7 @@ class DataIndex {
         for (const sid of this._batchChanges.affectedScheduleIds) {
           this._dirtyScheduleIds.add(sid);
           this._riskCache.byScheduleId.delete(sid);
+          this._suggestionCache.byScheduleId.delete(sid);
         }
       } else {
         this._dirtyScheduleIds = null;
@@ -2637,9 +2666,11 @@ class DataIndex {
 
     for (const sid of affectedScheduleIds) {
       this._riskCache.byScheduleId.delete(sid);
+      this._suggestionCache.byScheduleId.delete(sid);
     }
 
     this._riskCache.dirty = true;
+    this._suggestionCache.dirty = true;
   }
 
   filterCostumes(options = {}) {
@@ -4265,6 +4296,749 @@ class DataIndex {
       }
     }
     return s;
+  }
+
+
+  _parseSizeForSuggestion(sizeStr) {
+    if (!sizeStr) return null;
+    const s = sizeStr.trim().toUpperCase();
+    const sizeOrder = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
+    const idx = sizeOrder.indexOf(s);
+    if (idx >= 0) return { type: 'letter', value: idx, raw: s };
+    const numMatch = s.match(/(\d+)/);
+    if (numMatch) {
+      const num = parseInt(numMatch[1]);
+      if (num >= 150 && num <= 200) return { type: 'number', value: Math.round((num - 150) / 10), raw: s };
+      if (num >= 34 && num <= 52) return { type: 'number', value: Math.round((num - 34) / 3), raw: s };
+    }
+    return null;
+  }
+
+  _matchSizeLevelForSuggestion(sizeA, sizeB) {
+    const a = this._parseSizeForSuggestion(sizeA);
+    const b = this._parseSizeForSuggestion(sizeB);
+    if (!a || !b) return { level: 'unknown', score: 0, diff: 0 };
+    const diff = a.value - b.value;
+    if (diff === 0) return { level: 'perfect', score: 100, diff: 0 };
+    if (Math.abs(diff) === 1) return { level: 'close', score: 70, diff };
+    if (Math.abs(diff) === 2) return { level: 'fair', score: 40, diff };
+    return { level: 'mismatch', score: 0, diff };
+  }
+
+  _getCostumeBorrowFrequency(costumeId, days = 90) {
+    const records = this.getRecordsForCostume(costumeId);
+    const now = new Date();
+    const threshold = new Date(now);
+    threshold.setDate(threshold.getDate() - days);
+    const thresholdStr = threshold.toISOString();
+    let borrowCount = 0;
+    let lastBorrowAt = null;
+    for (const r of records) {
+      if (r.type === '借出' || r.type === '预约') {
+        if (r.timestamp >= thresholdStr) borrowCount++;
+        if (!lastBorrowAt || r.timestamp > lastBorrowAt) lastBorrowAt = r.timestamp;
+      }
+    }
+    return { borrowCount, lastBorrowAt };
+  }
+
+  _isCostumeAvailableForDate(costumeId, dateStr, excludeScheduleId = null) {
+    const todayStr = this._getTodayStr();
+    const costume = this.getCostumeById(costumeId);
+    if (!costume) return { available: false, reasons: ['服装不存在'] };
+    const reasons = [];
+    if (costume.status === '借出') {
+      const isOverdue = costume.due && costume.due < todayStr;
+      if (isOverdue) {
+        reasons.push(`逾期未还：${costume.borrower}，应还${costume.due}`);
+      } else if (costume.due && costume.due < dateStr) {
+        reasons.push(`借出中：${costume.borrower}，至${costume.due}，演出前可能未归还`);
+      }
+    }
+    const activeWO = this.getActiveWorkOrdersByCostumeId(costumeId);
+    if (activeWO.length > 0) {
+      const wo = activeWO[0];
+      const isWOOverdue = wo.dueDate && wo.dueDate < todayStr;
+      if (isWOOverdue) {
+        reasons.push(`${wo.type}工单逾期，负责人：${wo.assignee}`);
+      } else if (wo.dueDate && wo.dueDate > dateStr) {
+        reasons.push(`${wo.type}中，预计${wo.dueDate}完成，晚于演出日`);
+      } else {
+        reasons.push(`${wo.type}中：${wo.status}，负责人${wo.assignee}`);
+      }
+    }
+    if (costume.clean === '待清洗' && activeWO.length === 0) {
+      reasons.push('档案状态：待清洗');
+    }
+    if (costume.clean === '维修中' && activeWO.length === 0) {
+      reasons.push('档案状态：维修中');
+    }
+    const costumeSchedules = this.getSchedulesForCostume(costumeId);
+    for (const s of costumeSchedules) {
+      if (s.id === excludeScheduleId) continue;
+      if (s.date === dateStr) {
+        reasons.push(`同日被排期「${s.play} ${s.time || ''}」占用`);
+      }
+    }
+    const dayReservations = this.getActiveReservationsByPlayAndDate(costume.play, dateStr);
+    for (const r of dayReservations) {
+      if (r.costumeId === costumeId) {
+        reasons.push(`同日被${r.type}「${r.reservedFor}」预约占用`);
+      }
+    }
+    return {
+      available: reasons.length === 0,
+      reasons,
+      status: costume.status,
+      clean: costume.clean,
+      location: costume.location,
+      hasActiveWO: activeWO.length > 0,
+      activeWODetail: activeWO[0] || null,
+      borrower: costume.borrower,
+      dueDate: costume.due
+    };
+  }
+
+  _getCostumeAvailabilityScore(availability) {
+    if (availability.available) return 100;
+    let score = 100;
+    const now = new Date();
+    const todayStr = this._getTodayStr();
+    for (const reason of availability.reasons) {
+      if (reason.includes('逾期未还')) score -= 80;
+      else if (reason.includes('工单逾期')) score -= 75;
+      else if (reason.includes('晚于演出日')) score -= 70;
+      else if (reason.includes('维修')) score -= 60;
+      else if (reason.includes('演出前可能未归还')) score -= 50;
+      else if (reason.includes('同日被排期')) score -= 55;
+      else if (reason.includes('同日被') && reason.includes('预约')) score -= 55;
+      else if (reason.includes('工单')) score -= 25;
+      else if (reason.includes('借出中')) score -= 20;
+      else if (reason.includes('待清洗')) score -= 15;
+    }
+    return Math.max(0, score);
+  }
+
+  _computeCostumeOverallScore(costume, originalCostume, schedule, actorContext = null) {
+    const availability = this._isCostumeAvailableForDate(costume.id, schedule.date, schedule.id);
+    const availabilityScore = this._getCostumeAvailabilityScore(availability);
+    if (availabilityScore <= 0) return null;
+    let playMatchScore = 0;
+    if (costume.play === originalCostume.play) playMatchScore = 100;
+    else if (costume.play && originalCostume.play && costume.play.split(/[、,，]/)[0] === originalCostume.play.split(/[、,，]/)[0]) playMatchScore = 50;
+    else playMatchScore = 10;
+    const sizeMatch = this._matchSizeLevelForSuggestion(costume.size, originalCostume.size);
+    let sizeScore = sizeMatch.score;
+    if (actorContext?.actorSize) {
+      const actorSizeMatch = this._matchSizeLevelForSuggestion(costume.size, actorContext.actorSize);
+      sizeScore = Math.max(sizeScore, actorSizeMatch.score) * 0.5 + sizeScore * 0.5;
+    }
+    const { borrowCount, lastBorrowAt } = this._getCostumeBorrowFrequency(costume.id);
+    let historyScore = 100;
+    if (borrowCount > 20) historyScore = 40;
+    else if (borrowCount > 15) historyScore = 55;
+    else if (borrowCount > 10) historyScore = 70;
+    else if (borrowCount > 5) historyScore = 85;
+    if (lastBorrowAt) {
+      const lastDate = new Date(lastBorrowAt);
+      const daysSince = Math.floor((Date.now() - lastDate.getTime()) / (1000 * 60 * 60 * 24));
+      if (daysSince < 7) historyScore = Math.min(historyScore, 50);
+      else if (daysSince < 14) historyScore = Math.min(historyScore, 70);
+    }
+    const isSameId = costume.id === originalCostume.id;
+    const idPenalty = isSameId ? 0 : -5;
+    const overallScore = Math.round(
+      availabilityScore * 0.45 +
+      playMatchScore * 0.25 +
+      sizeScore * 0.20 +
+      historyScore * 0.10 +
+      idPenalty
+    );
+    return {
+      costume,
+      availability,
+      availabilityScore,
+      playMatchScore,
+      sizeMatch,
+      sizeScore,
+      historyScore,
+      borrowCount,
+      lastBorrowAt,
+      overallScore
+    };
+  }
+
+  _findAlternativeCostumes(originalCostume, schedule, limit = 5) {
+    if (!originalCostume) return [];
+    const candidates = [];
+    const samePlayCostumes = this.getCostumesByPlay(originalCostume.play);
+    for (const c of samePlayCostumes) {
+      if (c.id === originalCostume.id) continue;
+      const scored = this._computeCostumeOverallScore(c, originalCostume, schedule);
+      if (scored && scored.overallScore > 30) candidates.push(scored);
+    }
+    const allPlayCostumes = this.getActiveCostumes();
+    for (const c of allPlayCostumes) {
+      if (c.play === originalCostume.play) continue;
+      const scored = this._computeCostumeOverallScore(c, originalCostume, schedule);
+      if (scored && scored.overallScore > 50) candidates.push(scored);
+    }
+    candidates.sort((a, b) => b.overallScore - a.overallScore);
+    return candidates.slice(0, limit);
+  }
+
+  _generateActionSuggestion(riskType, costume, schedule) {
+    const actions = [];
+    const now = new Date();
+    const todayStr = this._getTodayStr();
+    const scheduleDate = new Date(schedule.date);
+    const daysUntil = Math.ceil((scheduleDate - now) / (1000 * 60 * 60 * 24));
+    switch (riskType) {
+      case 'overdue':
+        actions.push({
+          type: 'urge_return',
+          label: `催促归还：${costume.borrower || '借用人'}`,
+          priority: daysUntil <= 3 ? 'urgent' : 'high',
+          detail: `服装已逾期未还，应于${costume.due}归还。建议立即联系${costume.borrower || '借用人'}催还。`
+        });
+        break;
+      case 'borrowed':
+        if (costume.due && costume.due < schedule.date) {
+          actions.push({
+            type: 'coordinate_return',
+            label: '协调提前归还',
+            priority: daysUntil <= 7 ? 'high' : 'medium',
+            detail: `预计归还日${costume.due}早于演出日，建议与${costume.borrower || '借用人'}确认可按时归还。`
+          });
+        }
+        break;
+      case 'repair':
+        actions.push({
+          type: 'escalate_workorder',
+          label: '加急维修工单',
+          priority: daysUntil <= 5 ? 'urgent' : 'high',
+          detail: '维修状态影响演出，建议联系维修负责人加急处理，或启用备用服装。'
+        });
+        break;
+      case 'cleaning':
+        actions.push({
+          type: 'expedite_cleaning',
+          label: '优先安排清洗',
+          priority: daysUntil <= 3 ? 'urgent' : (daysUntil <= 7 ? 'high' : 'medium'),
+          detail: '服装待清洗，建议提前安排清洗工单，确保演出前完成。'
+        });
+        break;
+      case 'workorder_overdue':
+        actions.push({
+          type: 'escalate_workorder',
+          label: '跟进逾期工单',
+          priority: 'urgent',
+          detail: '工单已逾期，建议立即联系工单负责人确认状态并评估影响。'
+        });
+        break;
+      case 'workorder_late':
+        actions.push({
+          type: 'escalate_workorder',
+          label: '协调工单进度',
+          priority: daysUntil <= 3 ? 'urgent' : 'high',
+          detail: '工单预计完成晚于演出日，建议：1)联系负责人加急；2)同时准备备用服装。'
+        });
+        break;
+      case 'reservation_conflict':
+        actions.push({
+          type: 'negotiate_reservation',
+          label: '协商预约调整',
+          priority: daysUntil <= 5 ? 'high' : 'medium',
+          detail: '存在预约冲突，建议联系相关方协商调整预约时间或服装。'
+        });
+        break;
+      case 'packing_incomplete':
+        actions.push({
+          type: 'complete_packing',
+          label: '完成装箱核验',
+          priority: daysUntil <= 2 ? 'urgent' : (daysUntil <= 5 ? 'high' : 'medium'),
+          detail: '装箱单未完成，建议尽快逐项核验服装状态并标记完成。'
+        });
+        break;
+    }
+    return actions;
+  }
+
+  _computeSuggestionsForSchedule(scheduleId) {
+    const schedule = this.getScheduleById(scheduleId);
+    if (!schedule) return null;
+    const riskResult = this._riskCache.byScheduleId.get(scheduleId) || this.computeRisksForSchedule(scheduleId);
+    const highRiskCostumes = new Map();
+    const otherRisks = [];
+    for (const risk of riskResult.risks) {
+      if (risk.costumeId && risk.level === 'high') {
+        if (!highRiskCostumes.has(risk.costumeId)) {
+          highRiskCostumes.set(risk.costumeId, {
+            costume: this.getCostumeById(risk.costumeId),
+            risks: [],
+            riskTypes: new Set()
+          });
+        }
+        const entry = highRiskCostumes.get(risk.costumeId);
+        entry.risks.push(risk);
+        entry.riskTypes.add(risk.type);
+      } else if (risk.level === 'high' || risk.level === 'medium') {
+        otherRisks.push(risk);
+      }
+    }
+    const suggestions = [];
+    for (const [costumeId, entry] of highRiskCostumes) {
+      if (!entry.costume) continue;
+      const alternatives = this._findAlternativeCostumes(entry.costume, schedule, 5);
+      const allActions = [];
+      for (const riskType of entry.riskTypes) {
+        const actions = this._generateActionSuggestion(riskType, entry.costume, schedule);
+        allActions.push(...actions);
+      }
+      if (alternatives.length === 0) {
+        allActions.push({
+          type: 'manual_check',
+          label: '人工核查库存',
+          priority: 'high',
+          detail: '未找到合适的自动替代服装，建议人工核查库存或启动临时采购。'
+        });
+      }
+      suggestions.push({
+        id: `sugg-${scheduleId}-${costumeId}-${Date.now()}`,
+        suggestionId: `sugg-${scheduleId}-${costumeId}-${Date.now()}`,
+        scheduleId: schedule.id,
+        play: schedule.play,
+        scheduleDate: schedule.date,
+        scheduleTime: schedule.time,
+        scheduleVenue: schedule.venue,
+        costumeId,
+        costumeName: entry.costume.name,
+        costumeSize: entry.costume.size,
+        costumeLocation: entry.costume.location,
+        originalCostume: entry.costume,
+        actorName: entry.risks[0]?.actorName || '',
+        risks: entry.risks,
+        riskTypes: [...entry.riskTypes],
+        aggregatedTypes: [...entry.riskTypes].map(t => RISK_TYPE_LABELS[t] || t),
+        riskLevel: (() => {
+          const max = Math.max(...entry.risks.map(r => r.level === 'high' ? 3 : r.level === 'medium' ? 2 : 1));
+          return max === 3 ? 'high' : max === 2 ? 'medium' : 'low';
+        })(),
+        description: entry.risks[0]?.message || '服装占用风险',
+        alternatives: alternatives.map(a => ({
+          costumeId: a.costume.id,
+          name: a.costume.name,
+          size: a.costume.size,
+          location: a.costume.location,
+          play: a.costume.play,
+          role: a.costume.role || '',
+          score: a.overallScore,
+          availabilityScore: a.availabilityScore,
+          playMatchScore: a.playMatchScore,
+          sizeScore: a.sizeScore,
+          sizeMatchLevel: a.sizeMatch?.label || '',
+          borrowFrequency: a.borrowCount,
+          lastBorrowAt: a.lastBorrowAt,
+          crossPlay: a.costume.play !== originalCostume.play,
+          availabilityReasons: a.availability?.reasons || [],
+          isRecommended: a === alternatives[0],
+          costume: a.costume
+        })),
+        actions: allActions,
+        primaryAction: allActions[0] ? {
+          type: allActions[0].type,
+          title: allActions[0].label,
+          description: allActions[0].detail,
+          priority: allActions[0].priority
+        } : null,
+        recommendedAction: allActions[0] || null,
+        handler: '',
+        note: '',
+        createdAt: new Date().toISOString(),
+        status: this._suggestionCache.appliedSuggestions.get(`${scheduleId}|${costumeId}`) || 'pending',
+        appliedAt: null,
+        appliedBy: null,
+        appliedNote: null,
+        appliedAlternativeName: null
+      });
+    }
+    for (const risk of otherRisks) {
+      if (risk.costumeId && highRiskCostumes.has(risk.costumeId)) continue;
+      const actions = this._generateActionSuggestion(risk.type, risk.costumeId ? this.getCostumeById(risk.costumeId) || {} : {}, schedule);
+      if (actions.length === 0) continue;
+      const sugId = `sugg-${scheduleId}-${risk.riskKey || risk.type}-${Date.now()}`;
+      suggestions.push({
+        id: sugId,
+        suggestionId: sugId,
+        scheduleId: schedule.id,
+        play: schedule.play,
+        scheduleDate: schedule.date,
+        scheduleTime: schedule.time,
+        scheduleVenue: schedule.venue,
+        costumeId: risk.costumeId || null,
+        costumeName: risk.costumeName || null,
+        originalCostume: risk.costumeId ? this.getCostumeById(risk.costumeId) : null,
+        actorName: risk.actorName || '',
+        risks: [risk],
+        riskTypes: [risk.type],
+        aggregatedTypes: [RISK_TYPE_LABELS[risk.type] || risk.type],
+        riskLevel: risk.level || 'medium',
+        description: risk.message || '服装风险',
+        alternatives: [],
+        actions,
+        primaryAction: actions[0] ? {
+          type: actions[0].type,
+          title: actions[0].label,
+          description: actions[0].detail,
+          priority: actions[0].priority
+        } : null,
+        recommendedAction: actions[0],
+        handler: '',
+        note: '',
+        createdAt: new Date().toISOString(),
+        status: risk.costumeId ? (this._suggestionCache.appliedSuggestions.get(`${scheduleId}|${risk.costumeId}`) || 'pending') : 'pending',
+        appliedAt: null,
+        appliedBy: null,
+        appliedNote: null,
+        appliedAlternativeName: null
+      });
+    }
+    const packingLists = this.getPackingListsForSchedule(schedule.id);
+    for (const pl of packingLists) {
+      const incompleteItems = (pl.items || []).filter(i => i.status === '未标记' || i.status === '缺失' || i.status === '需清洗');
+      if (incompleteItems.length > 0) {
+        const riskLevel = incompleteItems.filter(i => i.status === '缺失').length > 0 ? 'high' :
+                         (incompleteItems.filter(i => i.status === '需清洗').length > 0 ? 'medium' : 'low');
+        if (riskLevel === 'high' || riskLevel === 'medium') {
+          const actions = this._generateActionSuggestion('packing_incomplete', {}, schedule);
+          const sugId = `sugg-${scheduleId}-packing-${pl.id}`;
+          suggestions.push({
+            id: sugId,
+            suggestionId: sugId,
+            scheduleId: schedule.id,
+            play: schedule.play,
+            scheduleDate: schedule.date,
+            scheduleTime: schedule.time,
+            scheduleVenue: schedule.venue,
+            costumeId: null,
+            costumeName: null,
+            originalCostume: null,
+            actorName: '',
+            risks: [{ type: 'packing_incomplete', level: riskLevel, message: `装箱单「${pl.name}」有${incompleteItems.length}项未完成` }],
+            riskTypes: ['packing_incomplete'],
+            aggregatedTypes: [RISK_TYPE_LABELS['packing_incomplete'] || '装箱未完成'],
+            riskLevel,
+            description: `装箱单「${pl.name}」有${incompleteItems.length}项未完成`,
+            packingListId: pl.id,
+            packingListName: pl.name,
+            incompleteItemCount: incompleteItems.length,
+            alternatives: [],
+            actions,
+            primaryAction: actions[0] ? {
+              type: actions[0].type,
+              title: actions[0].label,
+              description: actions[0].detail,
+              priority: actions[0].priority
+            } : null,
+            recommendedAction: actions[0],
+            handler: '',
+            note: '',
+            createdAt: new Date().toISOString(),
+            status: 'pending',
+            appliedAt: null,
+            appliedBy: null,
+            appliedNote: null,
+            appliedAlternativeName: null
+          });
+        }
+      }
+    }
+    suggestions.sort((a, b) => {
+      const priorityScore = (s) => {
+        const riskLevelScore = Math.max(...s.risks.map(r => r.level === 'high' ? 3 : r.level === 'medium' ? 2 : 1));
+        const hasAltScore = s.alternatives.length > 0 ? 1 : 0;
+        return riskLevelScore * 10 + hasAltScore;
+      };
+      return priorityScore(b) - priorityScore(a);
+    });
+    const activeCount = suggestions.filter(s => s.status !== 'applied').length;
+    const appliedCount = suggestions.filter(s => s.status === 'applied').length;
+    return {
+      scheduleId: schedule.id,
+      schedule,
+      suggestions,
+      totalCount: suggestions.length,
+      activeCount,
+      appliedCount,
+      hasHighPriorityAlternatives: suggestions.some(s => s.alternatives.length > 0 && s.status !== 'applied')
+    };
+  }
+
+  computeAllSuggestions(force = false) {
+    if (!force && !this._suggestionCache.dirty && this._suggestionCache.allSuggestions.length > 0) {
+      return this._suggestionCache.allSuggestions;
+    }
+    const startTime = performance.now();
+    const upcoming = this.getUpcomingSchedules30Days();
+    this.computeAllRisks();
+    const allSuggestions = [];
+    for (const schedule of upcoming) {
+      let result = this._suggestionCache.byScheduleId.get(schedule.id);
+      if (!result || force || (this._dirtyScheduleIds && this._dirtyScheduleIds.has(schedule.id))) {
+        result = this._computeSuggestionsForSchedule(schedule.id);
+        if (result) {
+          this._suggestionCache.byScheduleId.set(schedule.id, result);
+        }
+      }
+      if (result) {
+        allSuggestions.push(...result.suggestions);
+      }
+    }
+    allSuggestions.sort((a, b) => {
+      const levelOrder = { high: 0, medium: 1, low: 2 };
+      const aLevel = Math.max(...a.risks.map(r => levelOrder[r.level] ?? 2));
+      const bLevel = Math.max(...b.risks.map(r => levelOrder[r.level] ?? 2));
+      if (aLevel !== bLevel) return aLevel - bLevel;
+      const statusOrder = { pending: 0, confirmed: 1, deferred: 2, applied: 3 };
+      const aStatus = statusOrder[a.status] ?? 0;
+      const bStatus = statusOrder[b.status] ?? 0;
+      if (aStatus !== bStatus) return aStatus - bStatus;
+      return (a.scheduleDate || '').localeCompare(b.scheduleDate || '');
+    });
+    this._suggestionCache.allSuggestions = allSuggestions;
+    this._suggestionCache.dirty = false;
+    this._suggestionCache.lastBuildTime = performance.now() - startTime;
+    this._suggestionCache.computationCount++;
+    this._stats.suggestionComputationTime = this._suggestionCache.lastBuildTime;
+    this._stats.suggestionCount = allSuggestions.length;
+    this._rebuildSuggestionSecondaryIndexes(allSuggestions);
+    return allSuggestions;
+  }
+
+  _rebuildSuggestionSecondaryIndexes(allSuggestions) {
+    this._suggestionCache.byCostumeId.clear();
+    this._suggestionCache.byPlay.clear();
+    this._suggestionCache.byStatus.clear();
+    for (const s of allSuggestions) {
+      if (s.costumeId) {
+        this._addToMap(this._suggestionCache.byCostumeId, s.costumeId, s);
+      }
+      const schedule = this.getScheduleById(s.scheduleId);
+      if (schedule?.play) {
+        this._addToMap(this._suggestionCache.byPlay, schedule.play, s);
+      }
+      this._addToMap(this._suggestionCache.byStatus, s.status || 'pending', s);
+    }
+  }
+
+  getSuggestionsByScheduleId(scheduleId) {
+    this.computeAllSuggestions();
+    const cached = this._suggestionCache.byScheduleId.get(scheduleId);
+    return cached || null;
+  }
+
+  getSuggestionsByCostumeId(costumeId) {
+    this.computeAllSuggestions();
+    return this._suggestionCache.byCostumeId.get(costumeId) || [];
+  }
+
+  getAllSuggestions() {
+    return this.computeAllSuggestions();
+  }
+
+  filterSuggestions({ play, status, scheduleId, hasAlternatives, query } = {}) {
+    this.computeAllSuggestions();
+    let results = this._suggestionCache.allSuggestions;
+    if (scheduleId) {
+      results = results.filter(s => s.scheduleId === scheduleId);
+    }
+    if (play && play !== '全部剧目') {
+      const sched = this.getScheduleById;
+      results = results.filter(s => {
+        const sch = this.getScheduleById(s.scheduleId);
+        return sch?.play === play;
+      });
+    }
+    if (status && status !== '全部状态') {
+      results = results.filter(s => s.status === status);
+    }
+    if (hasAlternatives !== undefined && hasAlternatives !== null) {
+      results = results.filter(s => s.alternatives.length > 0 === hasAlternatives);
+    }
+    if (query && query.trim()) {
+      const q = query.trim().toLowerCase();
+      results = results.filter(s => {
+        const sch = this.getScheduleById(s.scheduleId);
+        const text = `${s.costumeName || ''} ${sch?.play || ''} ${sch?.date || ''} ${sch?.venue || ''} ${s.risks.map(r => r.message || '').join(' ')}`;
+        return text.toLowerCase().includes(q);
+      });
+    }
+    return results;
+  }
+
+  applyScheduleSuggestion(suggestionId, {
+    applyAlternative = null,
+    applyAction = null,
+    handler = '',
+    note = '',
+    updatePackingList = true
+  } = {}) {
+    const allSuggs = this.computeAllSuggestions();
+    const suggestion = allSuggs.find(s => s.id === suggestionId || s.suggestionId === suggestionId);
+    if (!suggestion) return { ok: false, error: '建议不存在' };
+    const schedule = this.getScheduleById(suggestion.scheduleId);
+    if (!schedule) return { ok: false, error: '排期不存在' };
+    const result = { ok: true, updates: [], warnings: [], scheduleUpdates: null, packingUpdates: [] };
+    let appliedAltName = null;
+    if (applyAlternative) {
+      const alt = suggestion.alternatives.find(a => a.costumeId === applyAlternative || (a.costume && a.costume.id === applyAlternative));
+      if (!alt) return { ok: false, error: '替代服装不存在' };
+      const oldCostumeId = suggestion.costumeId;
+      const newCostumeId = alt.costumeId || (alt.costume && alt.costume.id);
+      appliedAltName = alt.name || (alt.costume && alt.costume.name);
+      if (oldCostumeId && newCostumeId && schedule.linkedCostumeIds?.includes(oldCostumeId)) {
+        const newLinked = [...schedule.linkedCostumeIds];
+        const idx = newLinked.indexOf(oldCostumeId);
+        if (idx !== -1) {
+          newLinked[idx] = newCostumeId;
+        } else {
+          newLinked.push(newCostumeId);
+        }
+        result.scheduleUpdates = {
+          id: schedule.id,
+          linkedCostumeIds: newLinked,
+          _patch: { linkedCostumeIds: newLinked }
+        };
+        result.updates.push({
+          type: 'schedule_link',
+          scheduleId: schedule.id,
+          oldCostumeId,
+          newCostumeId,
+          from: suggestion.costumeName,
+          to: appliedAltName || newCostumeId
+        });
+      }
+      if (updatePackingList) {
+        const packingLists = this.getPackingListsForSchedule(schedule.id);
+        for (const pl of packingLists) {
+          const items = pl.items || [];
+          const targetItem = items.find(i => i.costumeId === oldCostumeId);
+          if (targetItem) {
+            const newItem = {
+              ...targetItem,
+              costumeId: newCostumeId,
+              costumeName: appliedAltName || newCostumeId,
+              size: alt.size || (alt.costume && alt.costume.size) || targetItem.size,
+              location: alt.location || (alt.costume && alt.costume.location) || targetItem.location,
+              note: `由调配建议替换：原「${suggestion.costumeName}」→「${appliedAltName || newCostumeId}」${targetItem.note ? ' | ' + targetItem.note : ''}`,
+              source: '调配建议替换',
+              replacedFrom: suggestion.costumeName
+            };
+            const plItems = items.map(i => i.costumeId === oldCostumeId ? newItem : i);
+            result.packingUpdates.push({
+              id: pl.id,
+              items: plItems
+            });
+            result.updates.push({
+              type: 'packing_item',
+              packingListId: pl.id,
+              packingListName: pl.name,
+              oldCostumeId,
+              newCostumeId,
+              from: suggestion.costumeName,
+              to: appliedAltName || newCostumeId
+            });
+          }
+        }
+      }
+    }
+    suggestion.status = 'applied';
+    suggestion.appliedAt = new Date().toISOString();
+    suggestion.appliedBy = handler || '系统';
+    suggestion.note = note || suggestion.note || '';
+    suggestion.handler = handler || suggestion.handler || '';
+    suggestion.appliedNote = note || (applyAction?.label || '') + (applyAlternative ? `；替换为「${appliedAltName || applyAlternative}」` : '');
+    suggestion.appliedAlternativeName = appliedAltName || null;
+    if (suggestion.costumeId) {
+      this._suggestionCache.appliedSuggestions.set(`${schedule.id}|${suggestion.costumeId}`, 'applied');
+    }
+    this._suggestionCache.dirty = true;
+    this.invalidateRisks();
+    this.invalidateSuggestions([schedule.id]);
+    return {
+      ok: true,
+      ...result,
+      suggestion,
+      schedule
+    };
+  }
+
+  confirmSuggestionOnly(suggestionId, { handler = '', note = '' } = {}) {
+    const allSuggs = this.computeAllSuggestions();
+    const suggestion = allSuggs.find(s => s.id === suggestionId || s.suggestionId === suggestionId);
+    if (!suggestion) return { ok: false, error: '建议不存在' };
+    suggestion.status = 'confirmed';
+    suggestion.appliedAt = new Date().toISOString();
+    suggestion.appliedBy = handler || '系统';
+    suggestion.appliedNote = note || '已确认建议并人工处理';
+    suggestion.handler = handler || suggestion.handler || '';
+    suggestion.note = note || suggestion.note || '';
+    this._suggestionCache.dirty = true;
+    this.invalidateSuggestions([suggestion.scheduleId]);
+    return { ok: true, suggestion };
+  }
+
+  deferSuggestion(suggestionId, { handler = '', note = '' } = {}) {
+    const allSuggs = this.computeAllSuggestions();
+    const suggestion = allSuggs.find(s => s.id === suggestionId || s.suggestionId === suggestionId);
+    if (!suggestion) return { ok: false, error: '建议不存在' };
+    suggestion.status = 'deferred';
+    suggestion.appliedAt = new Date().toISOString();
+    suggestion.appliedBy = handler || '系统';
+    suggestion.appliedNote = note || '暂缓处理';
+    suggestion.handler = handler || suggestion.handler || '';
+    suggestion.note = note || suggestion.note || '';
+    this._suggestionCache.dirty = true;
+    this.invalidateSuggestions([suggestion.scheduleId]);
+    return { ok: true, suggestion };
+  }
+
+  getSuggestionStats() {
+    const all = this.computeAllSuggestions();
+    const stats = {
+      total: all.length,
+      pending: 0,
+      confirmed: 0,
+      deferred: 0,
+      applied: 0,
+      withAlternatives: 0,
+      highRisk: 0,
+      mediumRisk: 0,
+      byPlay: {},
+      urgentCount: 0
+    };
+    for (const s of all) {
+      const key = s.status === 'confirmed' ? 'confirmed' : s.status === 'deferred' ? 'deferred' : s.status === 'applied' ? 'applied' : 'pending';
+      stats[key] = (stats[key] || 0) + 1;
+      if (s.alternatives && s.alternatives.length > 0) stats.withAlternatives++;
+      const lvl = s.riskLevel || (s.risks && s.risks.length > 0
+        ? (Math.max(...s.risks.map(r => r.level === 'high' ? 3 : r.level === 'medium' ? 2 : 1)) === 3 ? 'high' : Math.max(...s.risks.map(r => r.level === 'high' ? 3 : r.level === 'medium' ? 2 : 1)) === 2 ? 'medium' : 'low')
+        : 'low');
+      if (lvl === 'high') stats.highRisk++;
+      else if (lvl === 'medium') stats.mediumRisk++;
+      if (s.actions && s.actions.some(a => a.priority === 'urgent')) stats.urgentCount++;
+      if (s.play) {
+        if (!stats.byPlay[s.play]) stats.byPlay[s.play] = 0;
+        stats.byPlay[s.play]++;
+      } else {
+        const sch = this.getScheduleById(s.scheduleId);
+        if (sch?.play) {
+          if (!stats.byPlay[sch.play]) stats.byPlay[sch.play] = 0;
+          stats.byPlay[sch.play]++;
+        }
+      }
+    }
+    return stats;
   }
 
   computeDailyRisk(dateStr) {

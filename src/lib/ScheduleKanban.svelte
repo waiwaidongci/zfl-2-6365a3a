@@ -3,7 +3,8 @@
   import {
     CalendarDays, Plus, Search, X, Save, Trash2, Eye,
     AlertTriangle, AlertOctagon, Clock, Shirt, CheckCircle,
-    Link2, ChevronDown, ChevronUp, Wrench, Droplets, Package, User
+    Link2, ChevronDown, ChevronUp, Wrench, Droplets, Package, User,
+    ArrowRightLeft, Zap, ThumbsUp, SkipForward, Edit3, MessageSquare, CheckCircle2, PauseCircle
   } from 'lucide-svelte';
   import {
     addSchedule,
@@ -18,7 +19,14 @@
     RISK_TYPE_LABELS,
     updateRiskProcessingStatus,
     compute30DayRisks,
-    getRiskStats
+    getRiskStats,
+    getSuggestionsByScheduleId,
+    applyScheduleSuggestion,
+    confirmSuggestionOnly,
+    deferSuggestion,
+    SUGGESTION_STATUS,
+    SUGGESTION_STATUS_LABELS,
+    ACTION_PRIORITY_LABELS
   } from '$lib/scheduleStore.js';
   import { globalIndex } from '$lib/dataIndex.js';
 
@@ -48,6 +56,7 @@
   let showRiskDetail = false;
   let riskDate = '';
   let showRiskStatusMenu = null;
+  let detailTab = 'basic';
 
   let scheduleForm = {
     play: '',
@@ -178,6 +187,9 @@
   function closeDetail() {
     showDetailModal = false;
     selectedScheduleId = null;
+    detailTab = 'basic';
+    showRiskStatusMenu = null;
+    kanbanSuggestionForm = { handler: '', note: '' };
   }
 
   function openRiskSummary(date) {
@@ -350,6 +362,82 @@
   $: detailScheduleRisk = selectedSchedule
     ? computeDailyRisk(selectedSchedule.date, costumes, reservations, workOrders, packingLists).find((r) => r.schedule.id === selectedSchedule.id)
     : null;
+
+  $: detailScheduleSuggestions = selectedSchedule
+    ? (getSuggestionsByScheduleId(selectedSchedule.id)?.suggestions || [])
+    : [];
+
+  let kanbanSuggestionForm = { handler: '', note: '' };
+  let kanbanSelectedAltMap = new Map();
+
+  function getKanbanSelectedAlt(suggestionId, alternatives) {
+    if (kanbanSelectedAltMap.has(suggestionId)) return kanbanSelectedAltMap.get(suggestionId);
+    return alternatives && alternatives.length > 0 ? alternatives[0].costumeId : null;
+  }
+
+  function setKanbanSelectedAlt(suggestionId, altId) {
+    kanbanSelectedAltMap.set(suggestionId, altId);
+    kanbanSelectedAltMap = kanbanSelectedAltMap;
+  }
+
+  function handleKanbanApplySuggestion(sug) {
+    const altId = getKanbanSelectedAlt(sug.suggestionId, sug.alternatives);
+    const result = applyScheduleSuggestion(sug.suggestionId, {
+      applyAlternative: altId,
+      handler: kanbanSuggestionForm.handler,
+      note: kanbanSuggestionForm.note,
+      updatePackingList: true
+    });
+    dispatch('suggestion-applied', { suggestionId: sug.suggestionId, result });
+  }
+
+  function handleKanbanConfirmSuggestion(sug) {
+    confirmSuggestionOnly(sug.suggestionId, {
+      handler: kanbanSuggestionForm.handler,
+      note: kanbanSuggestionForm.note
+    });
+    dispatch('suggestion-confirmed', { suggestionId: sug.suggestionId });
+  }
+
+  function handleKanbanDeferSuggestion(sug) {
+    deferSuggestion(sug.suggestionId, {
+      handler: kanbanSuggestionForm.handler,
+      note: kanbanSuggestionForm.note
+    });
+    dispatch('suggestion-deferred', { suggestionId: sug.suggestionId });
+  }
+
+  function getScheduleActionIcon(type) {
+    if (!type) return Zap;
+    if (type.includes('repair') || type.includes('维修')) return Wrench;
+    if (type.includes('clean') || type.includes('清洗')) return Droplets;
+    if (type.includes('pack') || type.includes('装箱')) return Package;
+    if (type.includes('swap') || type.includes('替代') || type.includes('replace')) return ArrowRightLeft;
+    return Zap;
+  }
+
+  function getScheduleRiskLevelClass(level) {
+    if (level === 'high') return 'sk-risk-item-high';
+    if (level === 'medium') return 'sk-risk-item-medium';
+    return 'sk-risk-item-low';
+  }
+
+  function getScheduleRiskLevelLabel(level) {
+    if (level === 'high') return '高风险';
+    if (level === 'medium') return '中风险';
+    return '低风险';
+  }
+
+  function formatScheduleDetailTime(isoString) {
+    if (!isoString) return '';
+    const date = new Date(isoString);
+    const year = date.getFullYear();
+    const month = String(date.getMonth() + 1).padStart(2, '0');
+    const day = String(date.getDate()).padStart(2, '0');
+    const hours = String(date.getHours()).padStart(2, '0');
+    const minutes = String(date.getMinutes()).padStart(2, '0');
+    return `${year}-${month}-${day} ${hours}:${minutes}`;
+  }
 
   function handleGeneratePackingList(schedule) {
     const draft = generatePackingListFromSchedule(schedule, costumes, reservations, workOrders);
@@ -831,7 +919,19 @@
         <h2>排期详情</h2>
         <button type="button" class="sk-icon-btn" on:click={closeDetail} aria-label="关闭"><X size={20} /></button>
       </div>
+      <div class="sk-detail-tabs">
+        <button type="button" class="sk-detail-tab" class:sk-detail-tab-active={detailTab === 'basic'} on:click={() => { detailTab = 'basic'; }}>
+          <Eye size={13} />基本信息
+        </button>
+        <button type="button" class="sk-detail-tab" class:sk-detail-tab-active={detailTab === 'suggestion'} on:click={() => { detailTab = 'suggestion'; }}>
+          <ArrowRightLeft size={13} />调配建议
+          {#if detailScheduleSuggestions.length > 0}
+            <span class="sk-detail-tab-badge">{detailScheduleSuggestions.filter(s => s.status !== SUGGESTION_STATUS.APPLIED).length}</span>
+          {/if}
+        </button>
+      </div>
       <div class="sk-detail-body">
+        {#if detailTab === 'basic'}
         <div class="sk-detail-section">
           <div class="sk-info-row"><span>剧目</span><strong>{selectedSchedule.play}</strong></div>
           <div class="sk-info-row"><span>日期</span><strong>{formatDate(selectedSchedule.date)}</strong></div>
@@ -930,6 +1030,152 @@
             <h3><CheckCircle size={14} />风险提示</h3>
             <p class="sk-hint">当前无风险提示</p>
           </div>
+        {/if}
+        {/if}
+
+        {#if detailTab === 'suggestion'}
+          <div class="sk-detail-section">
+            <h3><User size={14} />处理信息</h3>
+            <div class="sk-suggest-form">
+              <label>
+                <span>负责人</span>
+                <input bind:value={kanbanSuggestionForm.handler} placeholder="请输入负责人姓名（选填）" />
+              </label>
+              <label>
+                <span>处理备注</span>
+                <textarea bind:value={kanbanSuggestionForm.note} placeholder="统一备注会应用到所有操作（选填）" rows="2"></textarea>
+              </label>
+            </div>
+          </div>
+
+          {#if detailScheduleSuggestions.length === 0}
+            <div class="sk-detail-section">
+              <h3><CheckCircle size={14} />调配建议</h3>
+              <p class="sk-hint">当前排期暂无需调配的建议</p>
+            </div>
+          {:else}
+            <div class="sk-detail-section">
+              <h3><ArrowRightLeft size={14} />调配建议 ({detailScheduleSuggestions.length})</h3>
+              <div class="sk-suggest-list">
+                {#each detailScheduleSuggestions as sug (sug.suggestionId)}
+                  <div class="sk-suggest-card" class:sk-suggest-card-applied={sug.status === SUGGESTION_STATUS.APPLIED}>
+                    <div class="sk-suggest-card-header">
+                      <div class="sk-suggest-title">
+                        <span class="sk-suggest-level sk-suggest-level-{sug.riskLevel}">
+                          {#if sug.riskLevel === 'high'}<AlertOctagon size={11} />
+                          {:else if sug.riskLevel === 'medium'}<AlertTriangle size={11} />
+                          {:else}<Clock size={11} />{/if}
+                          {getScheduleRiskLevelLabel(sug.riskLevel)}
+                        </span>
+                        <strong>{sug.description}</strong>
+                      </div>
+                      <span class="sk-risk-status-badge {sug.status === SUGGESTION_STATUS.PENDING ? 'sk-risk-status-pending' : sug.status === SUGGESTION_STATUS.CONFIRMED ? 'sk-risk-status-confirmed' : sug.status === SUGGESTION_STATUS.DEFERRED ? 'sk-risk-status-deferred' : 'sk-risk-status-resolved'}">
+                        {SUGGESTION_STATUS_LABELS[sug.status] || sug.status}
+                      </span>
+                    </div>
+
+                    {#if sug.primaryAction}
+                      <div class="sk-suggest-action">
+                        <svelte:component this={getScheduleActionIcon(sug.primaryAction.type)} size={12} />
+                        <strong>{sug.primaryAction.title}</strong>
+                        {#if sug.primaryAction.priority}
+                          <span class="sk-priority-tag sk-priority-{sug.primaryAction.priority}">
+                            {ACTION_PRIORITY_LABELS[sug.primaryAction.priority]}
+                          </span>
+                        {/if}
+                        <p>{sug.primaryAction.description}</p>
+                      </div>
+                    {/if}
+
+                    {#if sug.alternatives && sug.alternatives.length > 0 && sug.status !== SUGGESTION_STATUS.APPLIED}
+                      <div class="sk-alt-list">
+                        <div class="sk-alt-title"><Shirt size={11} />候选替代服装</div>
+                        {#each sug.alternatives as alt (alt.costumeId)}
+                          <label
+                            class="sk-alt-item"
+                            class:sk-alt-selected={getKanbanSelectedAlt(sug.suggestionId, sug.alternatives) === alt.costumeId}
+                          >
+                            <input
+                              type="radio"
+                              name="sk-alt-{sug.suggestionId}"
+                              value={alt.costumeId}
+                              checked={getKanbanSelectedAlt(sug.suggestionId, sug.alternatives) === alt.costumeId}
+                              on:change={() => setKanbanSelectedAlt(sug.suggestionId, alt.costumeId)}
+                              style="display:none;"
+                            />
+                            <div class="sk-alt-radio">
+                              {#if getKanbanSelectedAlt(sug.suggestionId, sug.alternatives) === alt.costumeId}
+                                <CheckCircle size={14} style="color:#4a8a4a;" />
+                              {:else}
+                                <div class="sk-alt-radio-circle"></div>
+                              {/if}
+                            </div>
+                            <div class="sk-alt-content">
+                              <div class="sk-alt-header">
+                                <strong>{alt.name}</strong>
+                                <span class="sk-alt-score">匹配度 {alt.score || 0}</span>
+                              </div>
+                              <div class="sk-alt-meta">
+                                {#if alt.size}<span>尺码 {alt.size}</span>{/if}
+                                {#if alt.role}<span>角色 {alt.role}</span>{/if}
+                                {#if alt.crossPlay}<span style="color:#8a6b4a;">跨剧目</span>{/if}
+                                {#if alt.borrowFrequency != null}<span>近90天借{alt.borrowFrequency}次</span>{/if}
+                              </div>
+                              {#if alt.availabilityReasons && alt.availabilityReasons.length > 0}
+                                <div class="sk-alt-reasons">
+                                  {#each alt.availabilityReasons as r}
+                                    <span class="sk-alt-reason">{r}</span>
+                                  {/each}
+                                </div>
+                              {/if}
+                            </div>
+                          </label>
+                        {/each}
+                      </div>
+                    {/if}
+
+                    {#if sug.appliedAlternativeName || sug.appliedAt}
+                      <div class="sk-suggest-applied-info">
+                        <CheckCircle size={12} style="color:#4a8a4a;" />
+                        <span>
+                          {#if sug.appliedBy}<strong>{sug.appliedBy}</strong> 于 {/if}
+                          {sug.appliedAt ? formatScheduleDetailTime(sug.appliedAt) : ''}
+                          {#if sug.appliedAlternativeName} 执行替换：<strong>{sug.appliedAlternativeName}</strong>{/if}
+                          {#if sug.note}<span class="sk-applied-note"> · {sug.note}</span>{/if}
+                        </span>
+                      </div>
+                    {:else if sug.status !== SUGGESTION_STATUS.APPLIED}
+                      <div class="sk-suggest-actions">
+                        <button type="button" class="sk-btn-primary sk-suggest-apply-btn" on:click={() => handleKanbanApplySuggestion(sug)}>
+                          <ThumbsUp size={13} />一键执行
+                        </button>
+                        <button type="button" class="sk-btn-secondary" on:click={() => handleKanbanConfirmSuggestion(sug)}>
+                          <CheckCircle2 size={13} />仅确认
+                        </button>
+                        <button type="button" class="sk-btn-secondary" on:click={() => handleKanbanDeferSuggestion(sug)}>
+                          <SkipForward size={13} />暂缓
+                        </button>
+                      </div>
+                    {/if}
+
+                    {#if sug.status === SUGGESTION_STATUS.CONFIRMED && sug.handler}
+                      <div class="sk-suggest-handler-note">
+                        <MessageSquare size={11} />
+                        {#if sug.handler}<strong>{sug.handler}：</strong>{/if}
+                        {sug.note || '已确认，等待手动处理'}
+                      </div>
+                    {:else if sug.status === SUGGESTION_STATUS.DEFERRED}
+                      <div class="sk-suggest-handler-note" style="background:#faf0e6;border-color:#e0c8a8;">
+                        <PauseCircle size={11} />
+                        {#if sug.handler}<strong>{sug.handler}：</strong>{/if}
+                        {sug.note || '已暂缓处理'}
+                      </div>
+                    {/if}
+                  </div>
+                {/each}
+              </div>
+            </div>
+          {/if}
         {/if}
 
         <div class="sk-modal-actions">
@@ -2083,6 +2329,283 @@
   .sk-risk-schedule-header strong { font-size: 15px; color: #26211c; }
   .sk-risk-schedule-header span { font-size: 13px; color: #6b5a4d; }
 
+  .sk-detail-tabs {
+    display: flex;
+    gap: 4px;
+    border-bottom: 1px solid #e4d8cc;
+    padding: 0 20px;
+    background: #faf6f2;
+  }
+  .sk-detail-tab {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 10px 16px;
+    border: 0;
+    border-bottom: 2px solid transparent;
+    background: transparent;
+    cursor: pointer;
+    font: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: #8a7665;
+    transition: all .15s;
+    position: relative;
+    top: 1px;
+  }
+  .sk-detail-tab:hover { color: #603d2d; }
+  .sk-detail-tab-active {
+    color: #603d2d;
+    border-bottom-color: #603d2d;
+    background: #fff;
+  }
+  .sk-detail-tab-badge {
+    background: #b84a3b;
+    color: #fff;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 8px;
+    line-height: 1;
+  }
+
+  .sk-suggest-form {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+  .sk-suggest-form label {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    font-size: 12px;
+    color: #6b5a4d;
+  }
+  .sk-suggest-form label span {
+    font-weight: 500;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .sk-suggest-form input,
+  .sk-suggest-form textarea {
+    width: 100%;
+    border: 1px solid #d8c8ba;
+    border-radius: 6px;
+    padding: 8px 10px;
+    background: #fff;
+    font: inherit;
+    font-size: 13px;
+    box-sizing: border-box;
+  }
+  .sk-suggest-form textarea { resize: vertical; min-height: 52px; }
+
+  .sk-suggest-list {
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .sk-suggest-card {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding: 12px;
+    background: #fff;
+    border: 1px solid #e4d8cc;
+    border-radius: 8px;
+  }
+  .sk-suggest-card-applied {
+    opacity: 0.75;
+    background: #f6faf6;
+  }
+  .sk-suggest-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .sk-suggest-title {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+    flex: 1;
+    min-width: 0;
+  }
+  .sk-suggest-title strong {
+    font-size: 13px;
+    color: #26211c;
+  }
+  .sk-suggest-level {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 7px;
+    border-radius: 4px;
+    flex-shrink: 0;
+  }
+  .sk-suggest-level-high { background: #fdecea; color: #8a2d2d; }
+  .sk-suggest-level-medium { background: #fff4e6; color: #8a5a1a; }
+  .sk-suggest-level-low { background: #e6efe6; color: #2d5a2d; }
+
+  .sk-suggest-action {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 12px;
+    background: #fffbf0;
+    border: 1px solid #e8d8b8;
+    border-radius: 6px;
+    flex-wrap: wrap;
+  }
+  .sk-suggest-action strong { font-size: 12px; color: #3b2f26; }
+  .sk-suggest-action p {
+    margin: 0;
+    font-size: 11px;
+    color: #6b5a4d;
+    line-height: 1.5;
+    flex-basis: 100%;
+    padding-left: 20px;
+  }
+
+  .sk-priority-tag {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .sk-priority-urgent { background: #fdecea; color: #8a2d2d; }
+  .sk-priority-high { background: #fff4e6; color: #8a5a1a; }
+  .sk-priority-medium { background: #e6eef6; color: #1a4a8a; }
+  .sk-priority-low { background: #efe4d9; color: #6b5a4d; }
+
+  .sk-alt-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .sk-alt-title {
+    font-size: 11px;
+    font-weight: 500;
+    color: #8a6b4a;
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+  }
+  .sk-alt-item {
+    display: flex;
+    gap: 10px;
+    padding: 10px;
+    background: #faf6f2;
+    border: 2px solid transparent;
+    border-radius: 6px;
+    cursor: pointer;
+    transition: all .15s;
+  }
+  .sk-alt-item:hover {
+    background: #fff;
+    border-color: #d8c8ba;
+  }
+  .sk-alt-selected {
+    background: #f0f8f0;
+    border-color: #4a8a4a;
+  }
+  .sk-alt-radio {
+    flex-shrink: 0;
+    padding-top: 1px;
+  }
+  .sk-alt-radio-circle {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    border: 2px solid #d8c8ba;
+  }
+  .sk-alt-content {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+  .sk-alt-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .sk-alt-header strong { font-size: 12px; color: #26211c; }
+  .sk-alt-score {
+    font-size: 10px;
+    font-weight: 600;
+    color: #2d5a2d;
+    background: #e6f0e6;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+  .sk-alt-meta {
+    display: flex;
+    gap: 6px;
+    flex-wrap: wrap;
+    font-size: 10px;
+    color: #6b5a4d;
+  }
+  .sk-alt-meta span {
+    background: #fff;
+    padding: 1px 5px;
+    border-radius: 3px;
+  }
+  .sk-alt-reasons {
+    display: flex;
+    gap: 4px;
+    flex-wrap: wrap;
+  }
+  .sk-alt-reason {
+    font-size: 10px;
+    padding: 1px 5px;
+    border-radius: 3px;
+    background: #fff4e6;
+    color: #8a5a1a;
+  }
+
+  .sk-suggest-actions {
+    display: flex;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+  .sk-suggest-applied-info {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 8px 10px;
+    background: #f0f8f0;
+    border: 1px solid #b8d8b8;
+    border-radius: 6px;
+    font-size: 11px;
+    color: #2d5a2d;
+    line-height: 1.5;
+  }
+  .sk-suggest-applied-info strong { color: #2d5a2d; }
+  .sk-applied-note { color: #6b5a4d; }
+  .sk-suggest-handler-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 6px;
+    padding: 8px 10px;
+    background: #eef6ee;
+    border: 1px solid #c8dcc8;
+    border-radius: 6px;
+    font-size: 11px;
+    color: #4a5a4a;
+    line-height: 1.5;
+  }
+  .sk-suggest-handler-note strong { color: #2d4a2d; }
+  .sk-suggest-apply-btn { background: #4a8a4a; }
+  .sk-suggest-apply-btn:hover { background: #3d753d; }
+
   @media (max-width: 900px) {
     .sk-toolbar { grid-template-columns: 1fr; }
     .sk-split { grid-template-columns: 1fr; }
@@ -2091,5 +2614,8 @@
     .sk-date-left { flex-wrap: wrap; }
     .sk-card-top { flex-direction: column; }
     .sk-pick-list { grid-template-columns: 1fr; }
+    .sk-suggest-card-header { flex-direction: column; }
+    .sk-suggest-actions { flex-direction: column; }
+    .sk-suggest-actions button { width: 100%; justify-content: center; }
   }
 </style>

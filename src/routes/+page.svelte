@@ -75,7 +75,8 @@
     refreshRisks,
     getPerformanceStats,
     getIndexSummary,
-    clearAllCaches
+    clearAllCaches,
+    executeSuggestionFull
   } from '$lib/scheduleStore.js';
   import InventoryPanel from '$lib/InventoryPanel.svelte';
   import InventoryDetail from '$lib/InventoryDetail.svelte';
@@ -252,6 +253,52 @@
   function handleRiskCenterChange() {
     refreshRisks();
     refreshDBStats();
+  }
+
+  function handleSuggestionApplied(e) {
+    const { suggestionId, result } = e.detail || {};
+    showSuggestionToast(result);
+    refreshRisks();
+    refreshDBStats();
+    globalIndex.invalidateSuggestions();
+  }
+
+  function handleSuggestionConfirmed(e) {
+    showSuggestionToast({ ok: true, message: '建议已确认，将手动处理' });
+    refreshDBStats();
+  }
+
+  function handleSuggestionDeferred(e) {
+    showSuggestionToast({ ok: true, message: '已暂缓处理此建议' });
+    refreshDBStats();
+  }
+
+  let suggestionToast = null;
+  let suggestionToastTimer = null;
+
+  function showSuggestionToast(result) {
+    if (!result) return;
+    clearTimeout(suggestionToastTimer);
+    if (result.ok) {
+      let message = '操作成功';
+      if (result.executed && result.updates && result.updates.length > 0) {
+        const linkUpdates = result.updates.filter(u => u.type === 'schedule_link');
+        const packUpdates = result.updates.filter(u => u.type === 'packing_item');
+        message = `调配完成：${linkUpdates.length} 个排期关联已更新${packUpdates.length > 0 ? `，${packUpdates.length} 个装箱单已同步` : ''}`;
+      } else if (result.message) {
+        message = result.message;
+      } else if (result.suggestion?.status === 'confirmed') {
+        message = '建议已确认';
+      } else if (result.suggestion?.status === 'deferred') {
+        message = '建议已暂缓';
+      }
+      suggestionToast = { type: 'success', message };
+    } else {
+      suggestionToast = { type: 'error', message: result.error || '操作失败' };
+    }
+    suggestionToastTimer = setTimeout(() => {
+      suggestionToast = null;
+    }, 3500);
   }
 
   function handleSelectInventoryTask(e) {
@@ -1724,6 +1771,9 @@
         {actors}
         on:change={handleScheduleChange}
         on:generate-packing-list={handleGeneratePackingListFromSchedule}
+        on:suggestion-applied={handleSuggestionApplied}
+        on:suggestion-confirmed={handleSuggestionConfirmed}
+        on:suggestion-deferred={handleSuggestionDeferred}
       />
     </section>
   {/if}
@@ -1736,6 +1786,9 @@
         {workOrders}
         {packingLists}
         on:change={handleRiskCenterChange}
+        on:suggestion-applied={handleSuggestionApplied}
+        on:suggestion-confirmed={handleSuggestionConfirmed}
+        on:suggestion-deferred={handleSuggestionDeferred}
       />
     </section>
   {/if}
@@ -3920,6 +3973,24 @@
   {/if}
 </main>
 
+{#if suggestionToast}
+  <div class="suggestion-toast suggestion-toast-{suggestionToast.type}">
+    <div class="suggestion-toast-icon">
+      {#if suggestionToast.type === 'success'}
+        <CheckCircle2 size={20} />
+      {:else}
+        <AlertTriangle size={20} />
+      {/if}
+    </div>
+    <div class="suggestion-toast-content">
+      <div class="suggestion-toast-message">{suggestionToast.message}</div>
+    </div>
+    <button type="button" class="suggestion-toast-close" on:click={() => suggestionToast = null}>
+      <X size={16} />
+    </button>
+  </div>
+{/if}
+
 <style>
   * { box-sizing: border-box; }
   :global(body) { margin: 0; background: #f6f1ea; color: #26211c; font-family: Inter, "PingFang SC", Arial, sans-serif; }
@@ -4777,5 +4848,68 @@
   @keyframes spin {
     from { transform: rotate(0deg); }
     to { transform: rotate(360deg); }
+  }
+
+  .suggestion-toast {
+    position: fixed;
+    top: 24px;
+    right: 24px;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 18px;
+    border-radius: 10px;
+    box-shadow: 0 8px 24px rgba(60, 40, 20, 0.15);
+    min-width: 280px;
+    max-width: 420px;
+    animation: toast-in 0.25s ease-out;
+  }
+  @keyframes toast-in {
+    from { opacity: 0; transform: translateY(-8px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+  .suggestion-toast-success {
+    background: #ecfdf5;
+    border: 1px solid #a7f3d0;
+    color: #065f46;
+  }
+  .suggestion-toast-error {
+    background: #fef2f2;
+    border: 1px solid #fecaca;
+    color: #991b1b;
+  }
+  .suggestion-toast-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+  }
+  .suggestion-toast-content {
+    flex: 1;
+    min-width: 0;
+  }
+  .suggestion-toast-message {
+    font-size: 14px;
+    font-weight: 500;
+    line-height: 1.5;
+  }
+  .suggestion-toast-close {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    border: none;
+    background: transparent;
+    color: inherit;
+    border-radius: 4px;
+    cursor: pointer;
+    opacity: 0.6;
+    flex-shrink: 0;
+  }
+  .suggestion-toast-close:hover {
+    opacity: 1;
+    background: rgba(0,0,0,0.05);
   }
 </style>

@@ -240,3 +240,118 @@ export function getIndexSummary() {
 export function clearAllCaches() {
   return globalIndex.clearAllCaches();
 }
+
+export const SUGGESTION_STATUS = {
+  PENDING: 'pending',
+  CONFIRMED: 'confirmed',
+  DEFERRED: 'deferred',
+  APPLIED: 'applied'
+};
+
+export const SUGGESTION_STATUS_LABELS = {
+  pending: '待处理',
+  confirmed: '已确认',
+  deferred: '暂缓',
+  applied: '已执行'
+};
+
+export const ACTION_PRIORITY_LABELS = {
+  urgent: '紧急',
+  high: '高优先',
+  medium: '中优先',
+  low: '低优先'
+};
+
+export function computeAllSuggestions(force = false) {
+  return globalIndex.computeAllSuggestions(force);
+}
+
+export function getSuggestionsByScheduleId(scheduleId) {
+  return globalIndex.getSuggestionsByScheduleId(scheduleId);
+}
+
+export function getSuggestionsByCostumeId(costumeId) {
+  return globalIndex.getSuggestionsByCostumeId(costumeId);
+}
+
+export function getAllSuggestions() {
+  return globalIndex.getAllSuggestions();
+}
+
+export function filterSuggestions(options) {
+  return globalIndex.filterSuggestions(options);
+}
+
+export function getSuggestionStats() {
+  return globalIndex.getSuggestionStats();
+}
+
+export function applyScheduleSuggestion(suggestionId, options) {
+  return executeSuggestionFull(suggestionId, {
+    alternativeCostumeId: options?.applyAlternative || null,
+    handler: options?.handler || '',
+    note: options?.note || '',
+    updatePackingList: options?.updatePackingList !== false
+  });
+}
+
+export function confirmSuggestionOnly(suggestionId, options) {
+  return globalIndex.confirmSuggestionOnly(suggestionId, options);
+}
+
+export function deferSuggestion(suggestionId, options) {
+  return globalIndex.deferSuggestion(suggestionId, options);
+}
+
+export function refreshSuggestions(scheduleIds) {
+  return globalIndex.invalidateSuggestions(scheduleIds);
+}
+
+export function refreshRisksAndSuggestions() {
+  globalIndex.invalidateRisks();
+  globalIndex.invalidateSuggestions();
+}
+
+export function executeSuggestionFull(suggestionId, {
+  alternativeCostumeId = null,
+  handler = '',
+  note = '',
+  updatePackingList = true
+} = {}) {
+  const result = globalIndex.applyScheduleSuggestion(suggestionId, {
+    applyAlternative: alternativeCostumeId,
+    handler,
+    note,
+    updatePackingList
+  });
+
+  if (!result.ok) {
+    return result;
+  }
+
+  const dbResults = [];
+
+  if (result.scheduleUpdates) {
+    const { id, ...patchFields } = result.scheduleUpdates;
+    const patch = {};
+    if (patchFields.linkedCostumeIds) patch.linkedCostumeIds = patchFields.linkedCostumeIds;
+    if (patchFields._patch) Object.assign(patch, patchFields._patch);
+    if (Object.keys(patch).length > 0) {
+      const r = updateOne(TABLES.schedules, id, patch);
+      dbResults.push({ type: 'schedule', id, result: r });
+    }
+  }
+
+  if (result.packingUpdates && result.packingUpdates.length > 0) {
+    for (const pu of result.packingUpdates) {
+      const r = updateOne(TABLES.packingLists, pu.id, { items: pu.items });
+      dbResults.push({ type: 'packingList', id: pu.id, result: r });
+    }
+  }
+
+  return {
+    ...result,
+    dbResults,
+    executed: true
+  };
+}
