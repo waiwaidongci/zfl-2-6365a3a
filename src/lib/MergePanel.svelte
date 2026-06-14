@@ -290,14 +290,16 @@
     const newDec = applyBatchStrategy(
       diffResult,
       decisions,
-      choice === DECISION_CHOICES.KEEP_CURRENT ? BATCH_STRATEGIES.KEEP_CURRENT_ALL : BATCH_STRATEGIES.USE_IMPORT_ALL
+      choice === DECISION_CHOICES.KEEP_CURRENT ? BATCH_STRATEGIES.KEEP_CURRENT_ALL : BATCH_STRATEGIES.USE_IMPORT_ALL,
+      {},
+      impactAnalysis
     );
     decisions = newDec;
     onUpdateDecisions?.(newDec);
   }
 
   function handleApplyBatchStrategy() {
-    const newDec = applyBatchStrategy(diffResult, decisions, selectedBatchStrategy, batchScope);
+    const newDec = applyBatchStrategy(diffResult, decisions, selectedBatchStrategy, batchScope, impactAnalysis);
     decisions = newDec;
     onUpdateDecisions?.(newDec);
   }
@@ -1255,7 +1257,7 @@
         </div>
         <div class="total-box">
           <div class="total-label">决策完成度</div>
-          <div class="total-val ok">{previewSummary?.totals.needsDecision - pendingCount}/{previewSummary?.totals.needsDecision || 0}</div>
+          <div class="total-val ok">{(previewSummary?.totals?.needsDecision || 0) - pendingCount}/{previewSummary?.totals?.needsDecision || 0}</div>
         </div>
       </div>
     </div>

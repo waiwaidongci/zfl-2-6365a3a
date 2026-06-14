@@ -1004,6 +1004,9 @@ function collectAllCostumeIdsFromDB(db) {
 }
 
 export function computeImpactAnalysis(currentDB, diffResult) {
+  if (!currentDB || !currentDB.tables || !diffResult || !diffResult.tables) {
+    return {};
+  }
   const impactData = collectAllCostumeIdsFromDB(currentDB);
   const result = {};
 
@@ -1013,14 +1016,14 @@ export function computeImpactAnalysis(currentDB, diffResult) {
     if (!td) continue;
 
     const allItems = [
-      ...td[DIFF_TYPES.FIELD_CONFLICT],
-      ...td[DIFF_TYPES.DELETED_SUSPECT],
-      ...td[DIFF_TYPES.TRUE_DELETE],
-      ...td[DIFF_TYPES.OLD_BACKUP_MISSING],
-      ...td[DIFF_TYPES.EVENT_BASED_RESOLVABLE],
-      ...td[DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT],
-      ...td[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT],
-      ...td[DIFF_TYPES.ADDED]
+      ...(td[DIFF_TYPES.FIELD_CONFLICT] || []),
+      ...(td[DIFF_TYPES.DELETED_SUSPECT] || []),
+      ...(td[DIFF_TYPES.TRUE_DELETE] || []),
+      ...(td[DIFF_TYPES.OLD_BACKUP_MISSING] || []),
+      ...(td[DIFF_TYPES.EVENT_BASED_RESOLVABLE] || []),
+      ...(td[DIFF_TYPES.MODIFIED_ONLY_IN_CURRENT] || []),
+      ...(td[DIFF_TYPES.MODIFIED_ONLY_IN_IMPORT] || []),
+      ...(td[DIFF_TYPES.ADDED] || [])
     ];
 
     for (const item of allItems) {
@@ -1040,9 +1043,15 @@ export function computeImpactAnalysis(currentDB, diffResult) {
       if (table === TABLES.costumes) {
         const info = impactData.byCostume[id];
         if (info) {
-          impactEntry.byType = { ...info.byType };
+          impactEntry.byType = {
+            schedule: info.schedule || 0,
+            workOrder: info.workOrder || 0,
+            packingList: info.packingList || 0,
+            inventoryItem: info.inventoryItem || 0,
+            costumeRef: info.costumeRef || 0
+          };
           impactEntry.details = [...info.details];
-          impactEntry.totalImpacts = info.schedule + info.workOrder + info.packingList + info.inventoryItem + info.costumeRef;
+          impactEntry.totalImpacts = (info.schedule || 0) + (info.workOrder || 0) + (info.packingList || 0) + (info.inventoryItem || 0) + (info.costumeRef || 0);
         }
       } else {
         const currentRec = item.current || item.imported;
@@ -1097,6 +1106,14 @@ export function classifyRiskLevel(diffType, item, impactTotal, table) {
 }
 
 export function buildPreviewSummary(diffResult, impactAnalysis) {
+  if (!diffResult || !diffResult.tables) {
+    return {
+      byTable: {},
+      byRiskLevel: { [RISK_LEVELS.DANGER]: [], [RISK_LEVELS.WARNING]: [], [RISK_LEVELS.INFO]: [] },
+      byImpactRange: { high: [], medium: [], low: [], none: [] },
+      totals: { tables: 0, needsDecision: 0, totalRecords: 0, danger: 0, warning: 0, info: 0 }
+    };
+  }
   const summary = {
     byTable: {},
     byRiskLevel: { [RISK_LEVELS.DANGER]: [], [RISK_LEVELS.WARNING]: [], [RISK_LEVELS.INFO]: [] },
@@ -1126,9 +1143,11 @@ export function buildPreviewSummary(diffResult, impactAnalysis) {
     const td = diffResult.tables[table];
     if (!td) continue;
 
+    const tableCounts = diffResult.summary?.[table] || {};
+
     summary.byTable[table] = {
       label: TABLE_LABELS[table] || table,
-      counts: { ...diffResult.summary[table] },
+      counts: { ...tableCounts },
       needsDecision: 0,
       items: [],
       totalImpactCount: 0
@@ -1142,7 +1161,7 @@ export function buildPreviewSummary(diffResult, impactAnalysis) {
     }
 
     for (const { diffType, item } of allDecisionItems) {
-      const impact = impactAnalysis[table]?.[item.id] || { totalImpacts: 0, byType: {}, details: [] };
+      const impact = impactAnalysis?.[table]?.[item.id] || { totalImpacts: 0, byType: {}, details: [] };
       const riskLevel = classifyRiskLevel(diffType, item, impact.totalImpacts, table);
       let impactRange = 'none';
       if (impact.totalImpacts >= 10) impactRange = 'high';
@@ -1174,8 +1193,8 @@ export function buildPreviewSummary(diffResult, impactAnalysis) {
     summary.byTable[table].needsDecision = allDecisionItems.length;
     summary.byTable[table].totalImpactCount = summary.byTable[table].items.reduce((s, r) => s + r.impactTotal, 0);
     summary.totals.needsDecision += allDecisionItems.length;
-    summary.totals.totalRecords += Object.keys(diffResult.summary[table]).reduce(
-      (s, k) => s + (diffResult.summary[table][k] || 0), 0
+    summary.totals.totalRecords += Object.keys(tableCounts).reduce(
+      (s, k) => s + (tableCounts[k] || 0), 0
     );
     if (allDecisionItems.length > 0) summary.totals.tables++;
   }
@@ -1340,7 +1359,7 @@ function getDanglingRecordName(table, rec) {
   }
 }
 
-export function applyBatchStrategy(diffResult, decisions, strategy, scope = {}) {
+export function applyBatchStrategy(diffResult, decisions, strategy, scope = {}, impactAnalysis = null) {
   const {
     tables = null,
     riskLevels = null,
@@ -1364,6 +1383,12 @@ export function applyBatchStrategy(diffResult, decisions, strategy, scope = {}) 
       for (const item of items) {
         const current = newDecisions[table]?.[item.id];
         if (current?.choice && current.choice !== DECISION_CHOICES.MANUAL) continue;
+
+        if (riskLevels && impactAnalysis) {
+          const impact = impactAnalysis[table]?.[item.id] || { totalImpacts: 0 };
+          const itemRisk = classifyRiskLevel(dtype, item, impact.totalImpacts, table);
+          if (!riskLevels.includes(itemRisk)) continue;
+        }
 
         let choice = null;
         let mergedData = null;
