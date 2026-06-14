@@ -22,6 +22,7 @@
     compute30DayRisks,
     getRiskStats,
     getSuggestionsByScheduleId,
+    getRisksByScheduleId,
     applyScheduleSuggestion,
     previewScheduleSuggestion,
     confirmSuggestionOnly,
@@ -33,11 +34,11 @@
   import { globalIndex } from '$lib/dataIndex.js';
 
   export let schedules = [];
-  const costumes = [];
-  const reservations = [];
-  const workOrders = [];
-  const packingLists = [];
-  const actors = [];
+  export let costumes = [];
+  export let reservations = [];
+  export let workOrders = [];
+  export let packingLists = [];
+  export let actors = [];
 
   const dispatch = createEventDispatcher();
 
@@ -110,7 +111,7 @@
 
   $: selectedSchedule = globalIndex.getScheduleById(selectedScheduleId);
 
-  $: selectedRiskSummary = riskDate ? computeDailyRisk(riskDate, costumes, reservations, workOrders, packingLists) : [];
+  $: selectedRiskSummary = riskDate ? getDailyRiskSummary(riskDate) : [];
 
   function openAddModal() {
     editingScheduleId = null;
@@ -224,15 +225,50 @@
   }
 
   function getDateRiskLevel(date) {
-    const risks = computeDailyRisk(date, costumes, reservations, workOrders, packingLists);
-    let high = 0, medium = 0;
-    for (const r of risks) {
-      high += r.highCount;
-      medium += r.mediumCount;
-    }
-    if (high > 0) return 'high';
-    if (medium > 0) return 'medium';
+    const riskSummary = computeDailyRisk(date, costumes, reservations, workOrders, packingLists);
+    if (!riskSummary || typeof riskSummary !== 'object') return 'low';
+    if (riskSummary.highCount > 0) return 'high';
+    if (riskSummary.mediumCount > 0) return 'medium';
     return 'low';
+  }
+
+  function getScheduleRiskCounts(scheduleId) {
+    const result = getRisksByScheduleId(scheduleId) || { risks: [] };
+    const risks = result.risks || [];
+    const activeRisks = risks.filter(r => r.processingStatus !== RISK_STATUS.RESOLVED);
+    return {
+      risks,
+      highCount: activeRisks.filter(r => r.level === 'high').length,
+      mediumCount: activeRisks.filter(r => r.level === 'medium').length
+    };
+  }
+
+  function getDailyRiskSummary(dateStr) {
+    const dayRisk = computeDailyRisk(dateStr, costumes, reservations, workOrders, packingLists);
+    if (!dayRisk || !dayRisk.risks) return [];
+    const scheduleMap = new Map();
+    for (const r of dayRisk.risks) {
+      if (!r.scheduleId) continue;
+      if (!scheduleMap.has(r.scheduleId)) {
+        const schedule = getUpcomingSchedules().find(s => s.id === r.scheduleId) || { id: r.scheduleId, play: '未知演出', status: '未知' };
+        scheduleMap.set(r.scheduleId, {
+          schedule,
+          risks: [],
+          pendingCount: 0,
+          confirmedCount: 0,
+          deferredCount: 0,
+          resolvedCount: 0
+        });
+      }
+      const item = scheduleMap.get(r.scheduleId);
+      item.risks.push(r);
+      const status = r.processingStatus || RISK_STATUS.PENDING;
+      if (status === RISK_STATUS.PENDING) item.pendingCount++;
+      else if (status === RISK_STATUS.CONFIRMED) item.confirmedCount++;
+      else if (status === RISK_STATUS.DEFERRED) item.deferredCount++;
+      else if (status === RISK_STATUS.RESOLVED) item.resolvedCount++;
+    }
+    return Array.from(scheduleMap.values());
   }
 
   function getLinkedCostumeDetails(linkedCostumeIds) {
@@ -362,7 +398,7 @@
 
   $: detailLinkedCostumes = selectedSchedule ? getLinkedCostumeDetails(selectedSchedule.linkedCostumeIds) : [];
   $: detailScheduleRisk = selectedSchedule
-    ? computeDailyRisk(selectedSchedule.date, costumes, reservations, workOrders, packingLists).find((r) => r.schedule.id === selectedSchedule.id)
+    ? getScheduleRiskCounts(selectedSchedule.id)
     : null;
 
   $: detailScheduleSuggestions = selectedSchedule
@@ -605,8 +641,7 @@
             <div class="sk-day-schedules">
               {#each daySchedules as schedule}
                 {@const linkedDetails = getLinkedCostumeDetails(schedule.linkedCostumeIds)}
-                {@const dayRisks = computeDailyRisk(date, costumes, reservations, workOrders, packingLists)}
-                {@const scheduleRisk = dayRisks.find((r) => r.schedule.id === schedule.id)}
+                {@const scheduleRisk = getScheduleRiskCounts(schedule.id)}
                 <div class="sk-card" class:sk-card-high={scheduleRisk && scheduleRisk.highCount > 0} class:sk-card-medium={scheduleRisk && scheduleRisk.highCount === 0 && scheduleRisk.mediumCount > 0}>
                   <div class="sk-card-top">
                     <div class="sk-card-info">
@@ -1267,7 +1302,7 @@
                   {/if}
                 </div>
               {/if}
-              {#if item.risks.length > 0}
+              {#if item.risks && item.risks.length > 0}
                 <div class="sk-detail-risks">
                   {#each item.risks as risk (risk.riskKey)}
                     <div class="sk-risk-item sk-risk-item-{risk.level}" class:sk-risk-item-resolved={risk.processingStatus === RISK_STATUS.RESOLVED}>
