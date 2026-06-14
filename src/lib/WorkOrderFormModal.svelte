@@ -135,3 +135,22 @@
     </div>
   </div>
 {/if}
+
+<style>
+  .modal-overlay { position: fixed; inset: 0; background: rgb(38 33 28 / .55); display: flex; align-items: center; justify-content: center; padding: 16px; z-index: 100; }
+  .modal { background: #fff; border-radius: 12px; width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto; box-shadow: 0 24px 60px rgb(38 33 28 / .25); }
+  .modal-header { display: flex; justify-content: space-between; align-items: center; padding: 18px 20px; border-bottom: 1px solid #e4d8cc; position: sticky; top: 0; background: #fff; border-radius: 12px 12px 0 0; }
+  .modal-header h2 { margin: 0; }
+  .icon-btn { background: transparent; color: #6b5a4d; padding: 6px; border-radius: 6px; }
+  .icon-btn:hover { background: #f6efe7; }
+  .detail-form, .lend-form { padding: 18px 20px 20px; display: flex; flex-direction: column; gap: 12px; }
+  .detail-form label, .lend-form label { display: flex; flex-direction: column; gap: 6px; font-size: 14px; color: #6b5a4d; }
+  .detail-form label span, .lend-form label span { font-weight: 500; }
+  .status-info { background: #f6efe7; border-radius: 8px; padding: 12px 14px; margin: 4px 0; }
+  .status-info p { margin: 4px 0; font-size: 14px; color: #4a3b30; }
+  .modal-actions { display: flex; justify-content: space-between; gap: 10px; margin-top: 8px; flex-wrap: wrap; }
+  .modal-actions button { flex: 1; min-width: 140px; }
+  .split { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .secondary { background: #efe4d9; color: #37261d; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+</style>
