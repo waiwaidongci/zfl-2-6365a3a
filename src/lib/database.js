@@ -1520,3 +1520,15 @@ export function parseBackupFile(jsonString) {
 }
 
 export { TABLES, TABLE_LABELS, DB_VERSION, DB_KEY, SOFT_DELETE_TABLES };
+export { MIGRATIONS, runMigrations };
+export {
+  migrate_v1_to_v2,
+  migrate_v2_to_v3,
+  migrate_v3_to_v4,
+  migrate_v4_to_v5,
+  migrate_v5_to_v6,
+  migrate_v6_to_v7,
+  migrate_v7_to_v8,
+  migrate_v8_to_v9,
+  migrate_v9_to_v10
+};

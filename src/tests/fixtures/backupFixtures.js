@@ -297,7 +297,7 @@ export function backupForIndexTest() {
     schedules,
     actors: [makeActorForBackup('a-idx-001', { name: '演员A', play: '牡丹亭' })],
     workOrders: [makeWorkOrderForBackup('w-idx-001', 'c-idx-003', { status: '清洗中' })],
-    reservations: [makeReservationForBackup('rv-idx-001', 'c-idx-001')],
+    reservations: [makeReservationForBackup('rv-idx-001', 'c-idx-001', { play: '牡丹亭', date: '2025-06-20' })],
     records: [makeRecordForBackup('r-idx-001', 'c-idx-002')]
   });
 }

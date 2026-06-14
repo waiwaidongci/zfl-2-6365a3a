@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
   makeV1DB,
   makeV2DB,
@@ -16,33 +16,24 @@ import {
   sampleActorV1,
   sampleTombstoneV8
 } from './fixtures/migrationSnapshots.js';
-
-const DB_KEY = 'zfl-2-database';
-const DB_VERSION = 10;
-const TABLES = {
-  costumes: 'costumes',
-  records: 'records',
-  reservations: 'reservations',
-  workOrders: 'workOrders',
-  actors: 'actors',
-  packingLists: 'packingLists',
-  schedules: 'schedules',
-  inventoryTasks: 'inventoryTasks',
-  inventoryItems: 'inventoryItems',
-  riskStatuses: 'riskStatuses',
-  suggestionStatuses: 'suggestionStatuses',
-  syncEvents: 'syncEvents',
-  tombstones: 'tombstones'
-};
-
-const SOFT_DELETE_TABLES = new Set([
-  TABLES.costumes,
-  TABLES.actors,
-  TABLES.schedules,
-  TABLES.workOrders,
-  TABLES.reservations,
-  TABLES.packingLists
-]);
+import {
+  TABLES,
+  DB_VERSION,
+  SOFT_DELETE_TABLES,
+  runMigrations,
+  initializeDatabase,
+  migrate_v1_to_v2,
+  migrate_v2_to_v3,
+  migrate_v3_to_v4,
+  migrate_v4_to_v5,
+  migrate_v5_to_v6,
+  migrate_v6_to_v7,
+  migrate_v7_to_v8,
+  migrate_v8_to_v9,
+  migrate_v9_to_v10,
+  saveFullDB,
+  getFullDB
+} from '$lib/database.js';
 
 const LEGACY_KEYS = {
   [TABLES.costumes]: 'zfl-2-costumes',
@@ -53,383 +44,97 @@ const LEGACY_KEYS = {
   [TABLES.packingLists]: 'zfl-2-packing-lists'
 };
 
-let storageMock = {};
-
-const localStorageMock = {
-  getItem: vi.fn((key) => (key in storageMock ? storageMock[key] : null)),
-  setItem: vi.fn((key, value) => {
-    storageMock[key] = String(value);
-  }),
-  removeItem: vi.fn((key) => {
-    delete storageMock[key];
-  }),
-  clear: vi.fn(() => {
-    storageMock = {};
-  })
-};
-
-Object.defineProperty(global, 'localStorage', { value: localStorageMock });
-
-if (!global.crypto) {
-  global.crypto = {
-    randomUUID: () => `uuid-${Math.random().toString(36).slice(2, 10)}`
-  };
-}
-
-function generateDeviceId() {
-  return 'dev-' + crypto.randomUUID().slice(0, 8);
-}
-
-function createEmptyDatabase() {
-  return {
-    version: DB_VERSION,
-    migratedAt: null,
-    _meta: {
-      deviceId: generateDeviceId(),
-      lastSyncedAt: null,
-      lastMergeAt: null,
-      createdAt: new Date().toISOString(),
-      syncCounter: 0,
-      schemaVersion: 2,
-      knownDevices: []
-    },
-    tables: {
-      [TABLES.costumes]: [],
-      [TABLES.records]: [],
-      [TABLES.reservations]: [],
-      [TABLES.workOrders]: [],
-      [TABLES.actors]: [],
-      [TABLES.packingLists]: [],
-      [TABLES.schedules]: [],
-      [TABLES.inventoryTasks]: [],
-      [TABLES.inventoryItems]: [],
-      [TABLES.riskStatuses]: [],
-      [TABLES.suggestionStatuses]: [],
-      [TABLES.syncEvents]: [],
-      [TABLES.tombstones]: []
-    }
-  };
-}
-
-function deepClone(obj) {
-  return JSON.parse(JSON.stringify(obj));
-}
-
-function migrate_v1_to_v2(db) {
-  if (!db.tables[TABLES.packingLists]) {
-    db.tables[TABLES.packingLists] = [];
-  }
-  return db;
-}
-
-function migrate_v2_to_v3(db) {
-  if (!db.tables[TABLES.schedules]) {
-    db.tables[TABLES.schedules] = [];
-  }
-  return db;
-}
-
-function migrate_v3_to_v4(db) {
-  if (!db.tables[TABLES.inventoryTasks]) {
-    db.tables[TABLES.inventoryTasks] = [];
-  }
-  if (!db.tables[TABLES.inventoryItems]) {
-    db.tables[TABLES.inventoryItems] = [];
-  }
-  return db;
-}
-
-function migrate_v4_to_v5(db) {
-  if (!db._meta) {
-    db._meta = {
-      deviceId: generateDeviceId(),
-      lastSyncedAt: null,
-      lastMergeAt: null,
-      createdAt: db.migratedAt || new Date().toISOString()
-    };
-  }
-  return db;
-}
-
-function migrate_v5_to_v6(db) {
-  if (!db.tables[TABLES.riskStatuses]) {
-    db.tables[TABLES.riskStatuses] = [];
-  }
-  return db;
-}
-
-function migrate_v6_to_v7(db) {
-  if (!db.tables[TABLES.syncEvents]) {
-    db.tables[TABLES.syncEvents] = [];
-  }
-  if (!db._meta) {
-    db._meta = {
-      deviceId: generateDeviceId(),
-      lastSyncedAt: null,
-      lastMergeAt: null,
-      createdAt: db.migratedAt || new Date().toISOString(),
-      syncCounter: 0,
-      schemaVersion: 2,
-      knownDevices: []
-    };
-  } else {
-    if (typeof db._meta.syncCounter !== 'number') {
-      db._meta.syncCounter = 0;
-    }
-    if (typeof db._meta.schemaVersion !== 'number') {
-      db._meta.schemaVersion = 2;
-    }
-    if (!Array.isArray(db._meta.knownDevices)) {
-      db._meta.knownDevices = [];
-    }
-  }
-  const now = new Date().toISOString();
-  for (const table of Object.values(TABLES)) {
-    if (table === TABLES.syncEvents || table === TABLES.records) continue;
-    if (!Array.isArray(db.tables[table])) continue;
-    for (const record of db.tables[table]) {
-      if (!record.createdAt) {
-        record.createdAt = now;
-      }
-      if (!record.updatedAt) {
-        record.updatedAt = record.createdAt || now;
-      }
-    }
-  }
-  return db;
-}
-
-function migrate_v7_to_v8(db) {
-  if (!db.tables[TABLES.tombstones]) {
-    db.tables[TABLES.tombstones] = [];
-  }
-  for (const table of SOFT_DELETE_TABLES) {
-    if (!Array.isArray(db.tables[table])) continue;
-    for (const record of db.tables[table]) {
-      if (record.deletedAt === undefined) {
-        record.deletedAt = null;
-        record.deletedByDeviceId = null;
-        record.deleteSummary = null;
-      }
-    }
-  }
-  return db;
-}
-
-function recordTombstone(db, table, recordId, record) {
-  if (!SOFT_DELETE_TABLES.has(table)) return null;
-  if (!db.tables[TABLES.tombstones]) {
-    db.tables[TABLES.tombstones] = [];
-  }
-  const fields = {
-    [TABLES.costumes]: ['name', 'play', 'size'],
-    [TABLES.actors]: ['name', 'role'],
-    [TABLES.schedules]: ['play', 'date', 'venue'],
-    [TABLES.workOrders]: ['type', 'costumeName', 'status'],
-    [TABLES.reservations]: ['costumeName', 'reservedFor'],
-    [TABLES.packingLists]: ['name', 'play']
-  };
-  function buildRecordSummary(t, r) {
-    if (!r) return '';
-    const flds = fields[t];
-    if (!flds) return r.id || '';
-    const parts = [];
-    for (const f of flds) {
-      const val = r[f];
-      if (val !== null && val !== undefined && val !== '') {
-        parts.push(String(val));
-      }
-    }
-    return parts.join(' · ') || r.id || '';
-  }
-  const summary = buildRecordSummary(table, record);
-  const tombstone = {
-    id: crypto.randomUUID(),
-    table,
-    recordId,
-    deletedAt: new Date().toISOString(),
-    deletedByDeviceId: db._meta?.deviceId || null,
-    summary,
-    recordSnapshot: record ? deepClone(record) : null
-  };
-  db.tables[TABLES.tombstones].unshift(tombstone);
-  return tombstone;
-}
-
-function migrate_v8_to_v9(db) {
-  if (!db.tables[TABLES.tombstones]) {
-    db.tables[TABLES.tombstones] = [];
-  }
-  for (const table of SOFT_DELETE_TABLES) {
-    if (!Array.isArray(db.tables[table])) continue;
-    for (const record of db.tables[table]) {
-      if (record.deletedAt === undefined) record.deletedAt = null;
-      if (record.deletedByDeviceId === undefined) record.deletedByDeviceId = null;
-      if (record.deleteSummary === undefined) record.deleteSummary = null;
-    }
-  }
-  const tombstoneRecordIds = new Set(
-    (db.tables[TABLES.tombstones] || []).map((t) => `${t.table}|${t.recordId}`)
-  );
-  for (const table of SOFT_DELETE_TABLES) {
-    if (!Array.isArray(db.tables[table])) continue;
-    for (const record of db.tables[table]) {
-      if (record.deletedAt && !tombstoneRecordIds.has(`${table}|${record.id}`)) {
-        recordTombstone(db, table, record.id, record);
-      }
-    }
-  }
-  return db;
-}
-
-function migrate_v9_to_v10(db) {
-  if (!db.tables[TABLES.suggestionStatuses]) {
-    db.tables[TABLES.suggestionStatuses] = [];
-  }
-  return db;
-}
-
-const MIGRATIONS = {
-  1: migrate_v1_to_v2,
-  2: migrate_v2_to_v3,
-  3: migrate_v3_to_v4,
-  4: migrate_v4_to_v5,
-  5: migrate_v5_to_v6,
-  6: migrate_v6_to_v7,
-  7: migrate_v7_to_v8,
-  8: migrate_v8_to_v9,
-  9: migrate_v9_to_v10
-};
-
-function runMigrations(db) {
-  const currentVersion = db.version || 1;
-  let migrated = deepClone(db);
-
-  for (let v = currentVersion; v < DB_VERSION; v++) {
-    const migration = MIGRATIONS[v];
-    if (typeof migration === 'function') {
-      try {
-        migrated = migration(migrated);
-        migrated.version = v + 1;
-      } catch (e) {
-        console.error(`[DB] Migration to v${v + 1} failed:`, e);
-        throw e;
-      }
-    }
-  }
-
-  migrated.version = DB_VERSION;
-  return migrated;
-}
-
-function hasLegacyData() {
-  for (const key of Object.values(LEGACY_KEYS)) {
-    if (localStorage.getItem(key) !== null) return true;
-  }
-  return false;
-}
-
-function readAllLegacyData() {
-  const result = {};
-  for (const [table, legacyKey] of Object.entries(LEGACY_KEYS)) {
-    const raw = localStorage.getItem(legacyKey);
-    let data = null;
-    try {
-      data = raw ? JSON.parse(raw) : null;
-    } catch (e) {
-      data = null;
-    }
-    result[table] = Array.isArray(data) ? data : [];
-  }
-  return result;
-}
-
-function migrateFromLegacy() {
-  const db = createEmptyDatabase();
-  const legacy = readAllLegacyData();
-  db.tables = {
-    [TABLES.costumes]: legacy[TABLES.costumes] || [],
-    [TABLES.records]: legacy[TABLES.records] || [],
-    [TABLES.reservations]: legacy[TABLES.reservations] || [],
-    [TABLES.workOrders]: legacy[TABLES.workOrders] || [],
-    [TABLES.actors]: legacy[TABLES.actors] || [],
-    [TABLES.packingLists]: legacy[TABLES.packingLists] || []
-  };
-  db.migratedAt = new Date().toISOString();
-  return db;
-}
-
-function readRawDB() {
-  const raw = localStorage.getItem(DB_KEY);
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw);
-  } catch (e) {
-    return null;
-  }
-}
-
-function writeRawDB(db) {
-  try {
-    localStorage.setItem(DB_KEY, JSON.stringify(db));
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
-function initializeDatabase() {
-  let db;
-  const existing = readRawDB();
-
-  if (existing && typeof existing === 'object' && existing.tables) {
-    try {
-      const migrated = runMigrations(existing);
-      if (migrated.version !== existing.version || !existing.migratedAt) {
-        migrated.migratedAt = new Date().toISOString();
-      }
-      writeRawDB(migrated);
-      db = migrated;
-    } catch (e) {
-      console.error('[DB] Migration failed, preserving existing data:', e);
-      db = existing;
-    }
-  } else if (hasLegacyData()) {
-    try {
-      const migrated = migrateFromLegacy();
-      writeRawDB(migrated);
-      db = migrated;
-    } catch (e) {
-      console.error('[DB] Legacy migration failed:', e);
-      const fresh = createEmptyDatabase();
-      writeRawDB(fresh);
-      db = fresh;
-    }
-  } else {
-    const fresh = createEmptyDatabase();
-    writeRawDB(fresh);
-    db = fresh;
-  }
-
-  return db;
-}
+function deepClone(obj) { return JSON.parse(JSON.stringify(obj)); }
 
 describe('数据库迁移链路验证', () => {
   beforeEach(() => {
-    storageMock = {};
-    localStorageMock.getItem.mockImplementation((key) => (key in storageMock ? storageMock[key] : null));
-    localStorageMock.setItem.mockImplementation((key, value) => {
-      storageMock[key] = String(value);
+    globalThis._storageMock._reset();
+    const allKeys = [...globalThis._storageMock._store.keys()];
+    for (const k of allKeys) globalThis._storageMock.removeItem(k);
+  });
+
+  describe('单步迁移函数（生产模块直接调用）', () => {
+    it('[数据链路: 迁移v1→v2] 生产函数 migrate_v1_to_v2 应新增packingLists表', () => {
+      const v1 = makeV1DB();
+      const result = deepClone(v1);
+      migrate_v1_to_v2(result);
+      expect(Array.isArray(result.tables.packingLists)).toBe(true);
     });
-    localStorageMock.removeItem.mockImplementation((key) => {
-      delete storageMock[key];
+
+    it('[数据链路: 迁移v2→v3] 生产函数 migrate_v2_to_v3 应新增schedules表', () => {
+      const v2 = makeV2DB();
+      const result = deepClone(v2);
+      migrate_v2_to_v3(result);
+      expect(Array.isArray(result.tables.schedules)).toBe(true);
     });
-    localStorageMock.clear.mockImplementation(() => {
-      storageMock = {};
+
+    it('[数据链路: 迁移v3→v4] 生产函数 migrate_v3_to_v4 应新增inventoryTasks和inventoryItems表', () => {
+      const v3 = makeV3DB();
+      const result = deepClone(v3);
+      migrate_v3_to_v4(result);
+      expect(Array.isArray(result.tables.inventoryTasks)).toBe(true);
+      expect(Array.isArray(result.tables.inventoryItems)).toBe(true);
+    });
+
+    it('[数据链路: 迁移v4→v5] 生产函数 migrate_v4_to_v5 应新增_meta信息', () => {
+      const v4 = makeV4DB();
+      const result = deepClone(v4);
+      migrate_v4_to_v5(result);
+      expect(result._meta).toBeDefined();
+      expect(result._meta.deviceId).toBeTruthy();
+    });
+
+    it('[数据链路: 迁移v5→v6] 生产函数 migrate_v5_to_v6 应新增riskStatuses表', () => {
+      const v5 = makeV5DB();
+      const result = deepClone(v5);
+      migrate_v5_to_v6(result);
+      expect(Array.isArray(result.tables.riskStatuses)).toBe(true);
+    });
+
+    it('[数据链路: 迁移v6→v7] 生产函数 migrate_v6_to_v7 应新增syncEvents表并补齐_meta字段', () => {
+      const v6 = makeV6DB();
+      const result = deepClone(v6);
+      migrate_v6_to_v7(result);
+      expect(Array.isArray(result.tables.syncEvents)).toBe(true);
+      expect(typeof result._meta.syncCounter).toBe('number');
+      expect(Array.isArray(result._meta.knownDevices)).toBe(true);
+    });
+
+    it('[数据链路: 迁移v6→v7] 生产函数 migrate_v6_to_v7 应补齐记录的createdAt和updatedAt', () => {
+      const costume = sampleCostumeV1('c-meta-001');
+      delete costume.createdAt;
+      delete costume.updatedAt;
+      const v6 = makeV6DB({ costumes: [costume] });
+      const result = deepClone(v6);
+      migrate_v6_to_v7(result);
+      const migrated = result.tables.costumes[0];
+      expect(migrated.createdAt).toBeTruthy();
+      expect(migrated.updatedAt).toBeTruthy();
+    });
+
+    it('[数据链路: 迁移v7→v8] 生产函数 migrate_v7_to_v8 应新增tombstones表并补齐软删除字段', () => {
+      const v7 = makeV7DB();
+      const result = deepClone(v7);
+      migrate_v7_to_v8(result);
+      expect(Array.isArray(result.tables.tombstones)).toBe(true);
+      for (const table of SOFT_DELETE_TABLES) {
+        if (Array.isArray(result.tables[table])) {
+          for (const r of result.tables[table]) {
+            expect('deletedAt' in r).toBe(true);
+          }
+        }
+      }
+    });
+
+    it('[数据链路: 迁移v9→v10] 生产函数 migrate_v9_to_v10 应新增suggestionStatuses表', () => {
+      const v9 = makeV9DB();
+      const result = deepClone(v9);
+      migrate_v9_to_v10(result);
+      expect(Array.isArray(result.tables.suggestionStatuses)).toBe(true);
     });
   });
 
-  describe('空数据库初始化', () => {
+  describe('空数据库初始化（生产模块 initializeDatabase）', () => {
     it('[数据链路: 初始化] 完全空的localStorage应创建v10空库', () => {
       const db = initializeDatabase();
       expect(db.version).toBe(DB_VERSION);
@@ -448,41 +153,41 @@ describe('数据库迁移链路验证', () => {
     });
   });
 
-  describe('单步迁移验证', () => {
-    it('[数据链路: 迁移v1→v2] 应新增packingLists表', () => {
+  describe('完整链式迁移（生产模块 runMigrations）', () => {
+    it('[数据链路: 迁移v1→v2] 链式迁移应新增packingLists表', () => {
       const v1 = makeV1DB();
-      const v2 = runMigrations(v1);
-      expect(v2.version).toBe(DB_VERSION);
-      expect(Array.isArray(v2.tables.packingLists)).toBe(true);
+      const result = runMigrations(v1);
+      expect(result.version).toBe(DB_VERSION);
+      expect(Array.isArray(result.tables.packingLists)).toBe(true);
     });
 
-    it('[数据链路: 迁移v2→v3] 应新增schedules表', () => {
+    it('[数据链路: 迁移v2→v3] 链式迁移应新增schedules表', () => {
       const v2 = makeV2DB();
       const result = runMigrations(v2);
       expect(Array.isArray(result.tables.schedules)).toBe(true);
     });
 
-    it('[数据链路: 迁移v3→v4] 应新增inventoryTasks和inventoryItems表', () => {
+    it('[数据链路: 迁移v3→v4] 链式迁移应新增inventoryTasks和inventoryItems表', () => {
       const v3 = makeV3DB();
       const result = runMigrations(v3);
       expect(Array.isArray(result.tables.inventoryTasks)).toBe(true);
       expect(Array.isArray(result.tables.inventoryItems)).toBe(true);
     });
 
-    it('[数据链路: 迁移v4→v5] 应新增_meta信息', () => {
+    it('[数据链路: 迁移v4→v5] 链式迁移应新增_meta信息', () => {
       const v4 = makeV4DB();
       const result = runMigrations(v4);
       expect(result._meta).toBeDefined();
       expect(result._meta.deviceId).toBeTruthy();
     });
 
-    it('[数据链路: 迁移v5→v6] 应新增riskStatuses表', () => {
+    it('[数据链路: 迁移v5→v6] 链式迁移应新增riskStatuses表', () => {
       const v5 = makeV5DB();
       const result = runMigrations(v5);
       expect(Array.isArray(result.tables.riskStatuses)).toBe(true);
     });
 
-    it('[数据链路: 迁移v6→v7] 应新增syncEvents表并补齐_meta字段', () => {
+    it('[数据链路: 迁移v6→v7] 链式迁移应新增syncEvents表并补齐_meta字段', () => {
       const v6 = makeV6DB();
       const result = runMigrations(v6);
       expect(Array.isArray(result.tables.syncEvents)).toBe(true);
@@ -490,7 +195,7 @@ describe('数据库迁移链路验证', () => {
       expect(Array.isArray(result._meta.knownDevices)).toBe(true);
     });
 
-    it('[数据链路: 迁移v6→v7] 应补齐记录的createdAt和updatedAt', () => {
+    it('[数据链路: 迁移v6→v7] 链式迁移应补齐记录的createdAt和updatedAt', () => {
       const costume = sampleCostumeV1('c-meta-001');
       delete costume.createdAt;
       delete costume.updatedAt;
@@ -501,7 +206,7 @@ describe('数据库迁移链路验证', () => {
       expect(migrated.updatedAt).toBeTruthy();
     });
 
-    it('[数据链路: 迁移v7→v8] 应新增tombstones表并补齐软删除字段', () => {
+    it('[数据链路: 迁移v7→v8] 链式迁移应新增tombstones表并补齐软删除字段', () => {
       const v7 = makeV7DB();
       const result = runMigrations(v7);
       expect(Array.isArray(result.tables.tombstones)).toBe(true);
@@ -514,7 +219,7 @@ describe('数据库迁移链路验证', () => {
       }
     });
 
-    it('[数据链路: 迁移v8→v9] 应为软删除但无墓碑的记录自动生成墓碑', () => {
+    it('[数据链路: 迁移v8→v9] 链式迁移应为软删除但无墓碑的记录自动生成墓碑', () => {
       const deletedCostume = sampleCostumeV1('c-del-001', {
         deletedAt: '2025-04-01T00:00:00.000Z',
         deletedByDeviceId: 'dev-test',
@@ -531,14 +236,14 @@ describe('数据库迁移链路验证', () => {
       expect(ts.table).toBe(TABLES.costumes);
     });
 
-    it('[数据链路: 迁移v9→v10] 应新增suggestionStatuses表', () => {
+    it('[数据链路: 迁移v9→v10] 链式迁移应新增suggestionStatuses表', () => {
       const v9 = makeV9DB();
       const result = runMigrations(v9);
       expect(Array.isArray(result.tables.suggestionStatuses)).toBe(true);
     });
   });
 
-  describe('完整链式迁移', () => {
+  describe('完整链式迁移（端到端）', () => {
     it('[数据链路: 完整迁移v1→v10] V1含数据的库应完成所有迁移且数据不丢失', () => {
       const v1 = populatedV1DB();
       const result = runMigrations(v1);
@@ -592,8 +297,8 @@ describe('数据库迁移链路验证', () => {
       ];
       const legacyActors = [sampleActorV1('a-legacy-1')];
 
-      storageMock[LEGACY_KEYS.costumes] = JSON.stringify(legacyCostumes);
-      storageMock[LEGACY_KEYS.actors] = JSON.stringify(legacyActors);
+      globalThis._storageMock._store.set(LEGACY_KEYS.costumes, JSON.stringify(legacyCostumes));
+      globalThis._storageMock._store.set(LEGACY_KEYS.actors, JSON.stringify(legacyActors));
 
       const db = initializeDatabase();
 
@@ -611,9 +316,9 @@ describe('数据库迁移链路验证', () => {
 
   describe('迁移边界与容错', () => {
     it('[数据链路: 容错] 已经是最新版本的DB不应发生变化', () => {
-      const fresh = createEmptyDatabase();
-      const beforeStr = JSON.stringify(fresh);
-      const result = runMigrations(fresh);
+      const db = initializeDatabase();
+      const beforeStr = JSON.stringify(db);
+      const result = runMigrations(db);
       expect(result.version).toBe(DB_VERSION);
     });
 
@@ -657,7 +362,7 @@ describe('数据库迁移链路验证', () => {
       const db1 = initializeDatabase();
       const costume = sampleCostumeV1('c-integ-001');
       db1.tables.costumes.push(costume);
-      writeRawDB(db1);
+      saveFullDB(db1);
 
       const db2 = initializeDatabase();
       expect(db2.tables.costumes).toHaveLength(1);
@@ -668,7 +373,7 @@ describe('数据库迁移链路验证', () => {
       const v5 = makeV5DB({
         costumes: [sampleCostumeV1('c-auto-migrate-001', { name: '自动迁移测试' })]
       });
-      writeRawDB(v5);
+      saveFullDB(v5);
 
       const db = initializeDatabase();
       expect(db.version).toBe(DB_VERSION);
