@@ -7,8 +7,18 @@
     "dev": "vite --host 0.0.0.0 --port 5172",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0 --port 5172",
-    "test": "vitest run",
-    "test:watch": "vitest"
+    "test": "vitest run --exclude='**/build.smoke.test.js'",
+    "test:watch": "vitest --exclude='**/build.smoke.test.js'",
+    "test:all": "vitest run",
+    "test:migration": "vitest run src/tests/database.migration.test.js",
+    "test:backup": "vitest run src/tests/database.backup.test.js",
+    "test:merge": "vitest run src/tests/mergeUtils.test.js",
+    "test:index": "vitest run src/tests/dataIndex.test.js",
+    "test:build": "vitest run src/tests/build.smoke.test.js",
+    "test:coverage": "vitest run --coverage --exclude='**/build.smoke.test.js'",
+    "lint:build": "vite build 2>&1",
+    "verify": "npm run test:migration && npm run test:backup && npm run test:merge && npm run test:index && npm run test:build",
+    "verify:quick": "npm run test && npm run lint:build"
   },
   "dependencies": {
     "@sveltejs/adapter-auto": "^4.0.0",
