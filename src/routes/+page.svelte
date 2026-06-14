@@ -36,6 +36,13 @@
   import { globalIndex } from '$lib/dataIndex.js';
   import ScheduleKanban from '$lib/ScheduleKanban.svelte';
   import RiskCenter from '$lib/RiskCenter.svelte';
+  import WorkOrderPanel from '$lib/WorkOrderPanel.svelte';
+  import RecordsPanel from '$lib/RecordsPanel.svelte';
+  import ReservationPanel from '$lib/ReservationPanel.svelte';
+  import WorkOrderFormModal from '$lib/WorkOrderFormModal.svelte';
+  import WorkOrderDetailModal from '$lib/WorkOrderDetailModal.svelte';
+  import LendModal from '$lib/LendModal.svelte';
+  import ReserveModal from '$lib/ReserveModal.svelte';
   import {
     getAllSchedules,
     getAllRiskStatuses,
@@ -87,6 +94,39 @@
     applyMerge
   } from '$lib/mergeUtils.js';
   import { generateSampleData, runPerformanceTests } from '$lib/sampleDataGenerator.js';
+  import {
+    createWorkOrderInitialForm,
+    getWorkOrderById,
+    getActiveWorkOrder,
+    createWorkOrder as woCreateWorkOrder,
+    updateWorkOrderStatus as woUpdateWorkOrderStatus
+  } from '$lib/workOrderStore.js';
+  import {
+    addRecord,
+    canLend,
+    returnCostume,
+    updateCostumeClean,
+    saveCostume as recSaveCostume,
+    formatDateTime
+  } from '$lib/recordsStore.js';
+  import {
+    getActorById,
+    findActorByName,
+    searchActorsByName,
+    getActorCostumeHistory,
+    matchSize,
+    checkPlayMatch,
+    getMatchBadgeClass,
+    getActorsByPlay,
+    getActorBorrowHistory,
+    getActorReservationHistory,
+    parseSize
+  } from '$lib/actorMatchUtils.js';
+  import {
+    createReservationInitialForm,
+    getLatestReservation,
+    getUpcomingReservations
+  } from '$lib/reservationStore.js';
 
   const now = new Date();
   const iso = (offset = 0) => {
@@ -110,33 +150,18 @@
   $: syncQueue = globalIndex.getAllSyncQueue();
   $: indexStats = $globalIndex.getPerformanceStats();
 
-  $: filtered = globalIndex.filterCostumes({
+  $: filtered = (costumes, globalIndex.filterCostumes({
     query,
     play: playFilter === '全部剧目' ? undefined : playFilter,
     onlyOverdue: showOverdue
-  });
+  }));
 
-  $: filteredRecords = globalIndex.filterRecords({
-    query: recordQuery
-  });
-
-  $: filteredReservations = globalIndex.filterReservations({
-    query: reservationQuery,
-    status: reservationFilter === '全部' ? undefined : reservationFilter
-  });
-
-  $: filteredWorkOrders = globalIndex.filterWorkOrders({
-    query: workOrderQuery,
-    status: workOrderFilter === '全部' ? undefined : workOrderFilter,
-    type: workOrderTypeFilter === '全部' ? undefined : workOrderTypeFilter
-  });
-
-  $: filteredPackingLists = globalIndex.filterPackingLists({
+  $: filteredPackingLists = (packingLists, globalIndex.filterPackingLists({
     query: packingListQuery,
     status: packingListFilter === '全部' ? undefined : packingListFilter
-  });
+  }));
 
-  $: uniquePlaysList = globalIndex.getAllPlays();
+  $: uniquePlaysList = (costumes, globalIndex.getAllPlays());
 
   let packingListQuery = '';
   let packingListFilter = '全部';
@@ -326,18 +351,6 @@
 
   function persist() {
     setAll(TABLES.costumes, costumes);
-  }
-
-  function persistRecords() {
-    setAll(TABLES.records, records);
-  }
-
-  function persistReservations() {
-    setAll(TABLES.reservations, reservations);
-  }
-
-  function persistWorkOrders() {
-    setAll(TABLES.workOrders, workOrders);
   }
 
   function persistActors() {
@@ -965,200 +978,19 @@
     return 'packing-status-pending';
   }
 
-  const sizeOrder = ['XS', 'S', 'M', 'L', 'XL', 'XXL', 'XXXL'];
-
-  function parseSize(sizeStr) {
-    if (!sizeStr) return null;
-    const s = sizeStr.trim().toUpperCase();
-    const idx = sizeOrder.indexOf(s);
-    if (idx >= 0) return idx;
-    const numMatch = s.match(/(\d+)/);
-    if (numMatch) {
-      const num = parseInt(numMatch[1]);
-      if (num >= 150 && num <= 200) return Math.round((num - 150) / 10);
-    }
-    return null;
-  }
-
-  function matchSize(costumeSize, actorSize) {
-    const c = parseSize(costumeSize);
-    const a = parseSize(actorSize);
-    if (c === null || a === null) return { level: 'unknown', label: '尺码信息不全', diff: 0 };
-    const diff = c - a;
-    if (diff === 0) return { level: 'perfect', label: '尺码完全匹配', diff: 0 };
-    if (Math.abs(diff) === 1) return { level: diff > 0 ? 'loose' : 'tight', label: diff > 0 ? '服装稍大' : '服装稍小', diff };
-    return { level: 'mismatch', label: diff > 0 ? '服装过大' : '服装过小', diff };
-  }
-
-  function getActorById(id) {
-    return globalIndex.getActorById(id);
-  }
-
-  function getActorsByPlay(play) {
-    return globalIndex.getActorsByPlay(play);
-  }
-
-  function getMatchBadgeClass(level) {
-    if (level === 'perfect') return 'match-perfect';
-    if (level === 'loose' || level === 'tight') return 'match-close';
-    if (level === 'mismatch') return 'match-mismatch';
-    return 'match-unknown';
-  }
-
-  function findActorByName(name) {
-    return globalIndex.findActorByName(name);
-  }
-
-  function searchActorsByName(name) {
-    return globalIndex.searchActorsByName(name);
-  }
-
-  function getActorBorrowHistory(actorName) {
-    return globalIndex.getActorBorrowHistory(actorName);
-  }
-
-  function getActorReservationHistory(actorName) {
-    return globalIndex.getActorReservationHistory(actorName);
-  }
-
-  function getActorCostumeHistory(actorName) {
-    return globalIndex.getActorCostumeHistory(actorName);
-  }
-
-  function checkPlayMatch(costumePlay, actorPlays) {
-    if (!costumePlay || !actorPlays || !Array.isArray(actorPlays)) return { match: false, label: '剧目信息不足' };
-    if (actorPlays.includes(costumePlay)) return { match: true, label: `演员参演该剧目` };
-    return { match: false, label: `演员未参演该剧目` };
-  }
-
-  function getActiveWorkOrder(costumeId) {
-    return globalIndex.getActiveWorkOrder(costumeId);
-  }
-
-  function canLend(costumeId) {
-    return globalIndex.canLend(costumeId);
-  }
-
-  function checkConflict(costumeId, date, excludeId = null) {
-    return globalIndex.checkConflict(costumeId, date, excludeId);
-  }
-
-  function createWorkOrder(type, costume, assignee = '', note = '') {
-    const initialStatus = type === '清洗' ? '待清洗' : '待维修';
-    const workOrder = {
-      id: crypto.randomUUID(),
-      type,
-      costumeId: costume.id,
-      costumeName: costume.name,
-      play: costume.play,
-      status: initialStatus,
-      assignee: assignee || (type === '清洗' ? '张阿姨' : '李师傅'),
-      dueDate: iso(type === '清洗' ? 2 : 5),
-      note,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString()
-    };
-    workOrders = [workOrder, ...workOrders];
-    persistWorkOrders();
-    addRecord('工单创建', costume, '系统', `创建${type}工单「${workOrder.id.slice(0, 8)}」，状态：${initialStatus}，负责人：${workOrder.assignee}`);
-
-    if (type === '清洗') {
-      const costumeToUpdate = costumes.find((c) => c.id === costume.id);
-      if (costumeToUpdate && costumeToUpdate.clean !== '待清洗') {
-        costumes = costumes.map((c) => c.id === costume.id ? { ...c, clean: '待清洗' } : c);
-        persist();
-        addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」清洗状态变更为「待清洗」`);
-      }
-    } else if (type === '维修') {
-      const costumeToUpdate = costumes.find((c) => c.id === costume.id);
-      if (costumeToUpdate && costumeToUpdate.clean !== '维修中') {
-        costumes = costumes.map((c) => c.id === costume.id ? { ...c, clean: '维修中' } : c);
-        persist();
-        addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」状态变更为「维修中」`);
-      }
-    }
-
-    return workOrder;
-  }
-
-  function updateWorkOrderStatus(id, newStatus) {
-    const workOrder = globalIndex.getWorkOrderById(id);
-    if (!workOrder) return;
-    const costume = { name: workOrder.costumeName, play: workOrder.play };
-    workOrders = workOrders.map((wo) => wo.id === id ? { ...wo, status: newStatus, updatedAt: new Date().toISOString() } : wo);
-    persistWorkOrders();
-    addRecord('工单更新', costume, '系统', `工单「${id.slice(0, 8)}」状态从「${workOrder.status}」变更为「${newStatus}」`);
-
-    if (newStatus === '已完成' && workOrder.type === '清洗') {
-      const costumeToUpdate = globalIndex.getCostumeById(workOrder.costumeId);
-      if (costumeToUpdate && costumeToUpdate.clean === '待清洗') {
-        costumes = costumes.map((c) => c.id === workOrder.costumeId ? { ...c, clean: '已清洗' } : c);
-        persist();
-        addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」清洗状态从「待清洗」变更为「已清洗」`);
-      }
-    }
-
-    if (newStatus === '已完成' && workOrder.type === '维修') {
-      const costumeToUpdate = globalIndex.getCostumeById(workOrder.costumeId);
-      if (costumeToUpdate && costumeToUpdate.clean === '维修中') {
-        costumes = costumes.map((c) => c.id === workOrder.costumeId ? { ...c, clean: '已清洗' } : c);
-        persist();
-        addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」维修完成，状态变更为「已清洗」`);
-      }
-    }
-
-    if (newStatus === '已取消') {
-      const costumeToUpdate = globalIndex.getCostumeById(workOrder.costumeId);
-      if (costumeToUpdate) {
-        const otherActiveWO = workOrders.find((wo) => wo.costumeId === workOrder.costumeId && wo.id !== id && (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中'));
-        if (!otherActiveWO) {
-          let newCleanStatus = '已清洗';
-          if (costumeToUpdate.clean === '待清洗' || costumeToUpdate.clean === '维修中') {
-            newCleanStatus = '已清洗';
-          }
-          costumes = costumes.map((c) => c.id === workOrder.costumeId ? { ...c, clean: newCleanStatus } : c);
-          persist();
-          addRecord('清洗', costumeToUpdate, '系统', `工单取消，「${costumeToUpdate.name}」状态变更为「${newCleanStatus}」`);
-        }
-      }
-    }
-  }
-
   function openCreateWorkOrder(costumeId = null, type = '维修') {
     creatingWorkOrder = true;
     editingWorkOrderId = null;
-    const initialStatus = type === '清洗' ? '待清洗' : '待维修';
     if (costumeId) {
-      const costume = globalIndex.getCostumeById(costumeId);
-      if (costume) {
-        workOrderForm = {
-          type,
-          costumeId: costume.id,
-          costumeName: costume.name,
-          play: costume.play,
-          status: initialStatus,
-          assignee: type === '清洗' ? '张阿姨' : '李师傅',
-          dueDate: iso(type === '清洗' ? 2 : 5),
-          note: ''
-        };
-      }
+      workOrderForm = createWorkOrderInitialForm(type, globalIndex.getCostumeById(costumeId));
     } else {
-      workOrderForm = {
-        type,
-        costumeId: '',
-        costumeName: '',
-        play: '',
-        status: initialStatus,
-        assignee: type === '清洗' ? '张阿姨' : '李师傅',
-        dueDate: iso(type === '清洗' ? 2 : 5),
-        note: ''
-      };
+      workOrderForm = createWorkOrderInitialForm(type);
     }
     showWorkOrderModal = true;
   }
 
   function openEditWorkOrder(id) {
-    const workOrder = globalIndex.getWorkOrderById(id);
+    const workOrder = getWorkOrderById(id);
     if (!workOrder) return;
     creatingWorkOrder = false;
     editingWorkOrderId = id;
@@ -1173,91 +1005,6 @@
     selectedWorkOrderId = null;
   }
 
-  function saveWorkOrder() {
-    if (!workOrderForm.costumeId || !workOrderForm.assignee.trim()) return;
-
-    if (creatingWorkOrder) {
-      const costume = globalIndex.getCostumeById(workOrderForm.costumeId);
-      if (!costume) return;
-      const workOrder = {
-        id: crypto.randomUUID(),
-        ...workOrderForm,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      };
-      workOrders = [workOrder, ...workOrders];
-      persistWorkOrders();
-      addRecord('工单创建', costume, '系统', `创建${workOrder.type}工单「${workOrder.id.slice(0, 8)}」，状态：${workOrder.status}，负责人：${workOrder.assignee}`);
-
-      if (workOrder.type === '清洗' && (workOrder.status === '待清洗' || workOrder.status === '清洗中')) {
-        costumes = costumes.map((c) => c.id === costume.id ? { ...c, clean: '待清洗' } : c);
-        persist();
-        addRecord('清洗', costume, '系统', `「${costume.name}」清洗状态变更为「待清洗」`);
-      } else if (workOrder.type === '维修' && (workOrder.status === '待维修' || workOrder.status === '维修中')) {
-        costumes = costumes.map((c) => c.id === costume.id ? { ...c, clean: '维修中' } : c);
-        persist();
-        addRecord('清洗', costume, '系统', `「${costume.name}」状态变更为「维修中」`);
-      }
-    } else if (editingWorkOrderId) {
-      const oldWorkOrder = workOrders.find((wo) => wo.id === editingWorkOrderId);
-      if (oldWorkOrder && oldWorkOrder.status !== workOrderForm.status) {
-        const costume = { name: oldWorkOrder.costumeName, play: oldWorkOrder.play };
-        addRecord('工单更新', costume, '系统', `工单「${editingWorkOrderId.slice(0, 8)}」状态从「${oldWorkOrder.status}」变更为「${workOrderForm.status}」`);
-      }
-      workOrders = workOrders.map((wo) => wo.id === editingWorkOrderId ? { ...wo, ...workOrderForm, updatedAt: new Date().toISOString() } : wo);
-      persistWorkOrders();
-
-      if (workOrderForm.status === '已完成' && workOrderForm.type === '清洗') {
-        const costumeToUpdate = globalIndex.getCostumeById(workOrderForm.costumeId);
-        if (costumeToUpdate && costumeToUpdate.clean === '待清洗') {
-          costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '已清洗' } : c);
-          persist();
-          addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」清洗状态从「待清洗」变更为「已清洗」`);
-        }
-      }
-
-      if (workOrderForm.status === '已完成' && workOrderForm.type === '维修') {
-        const costumeToUpdate = globalIndex.getCostumeById(workOrderForm.costumeId);
-        if (costumeToUpdate && costumeToUpdate.clean === '维修中') {
-          costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '已清洗' } : c);
-          persist();
-          addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」维修完成，状态变更为「已清洗」`);
-        }
-      }
-
-      if ((workOrderForm.status === '待清洗' || workOrderForm.status === '清洗中') && workOrderForm.type === '清洗') {
-        const costumeToUpdate = globalIndex.getCostumeById(workOrderForm.costumeId);
-        if (costumeToUpdate && costumeToUpdate.clean !== '待清洗') {
-          costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '待清洗' } : c);
-          persist();
-          addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」清洗状态变更为「待清洗」`);
-        }
-      }
-
-      if ((workOrderForm.status === '待维修' || workOrderForm.status === '维修中') && workOrderForm.type === '维修') {
-        const costumeToUpdate = globalIndex.getCostumeById(workOrderForm.costumeId);
-        if (costumeToUpdate && costumeToUpdate.clean !== '维修中') {
-          costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '维修中' } : c);
-          persist();
-          addRecord('清洗', costumeToUpdate, '系统', `「${costumeToUpdate.name}」状态变更为「维修中」`);
-        }
-      }
-
-      if (workOrderForm.status === '已取消') {
-        const costumeToUpdate = globalIndex.getCostumeById(workOrderForm.costumeId);
-        if (costumeToUpdate) {
-          const otherActiveWO = workOrders.find((wo) => wo.costumeId === workOrderForm.costumeId && wo.id !== editingWorkOrderId && (wo.status === '待清洗' || wo.status === '清洗中' || wo.status === '待维修' || wo.status === '维修中'));
-          if (!otherActiveWO) {
-            costumes = costumes.map((c) => c.id === workOrderForm.costumeId ? { ...c, clean: '已清洗' } : c);
-            persist();
-            addRecord('清洗', costumeToUpdate, '系统', `工单取消，「${costumeToUpdate.name}」状态变更为「已清洗」`);
-          }
-        }
-      }
-    }
-    closeWorkOrderModal();
-  }
-
   function openWorkOrderDetail(id) {
     selectedWorkOrderId = id;
   }
@@ -1266,84 +1013,58 @@
     selectedWorkOrderId = null;
   }
 
-  function getAvailableStatuses(workOrder) {
-    if (workOrder.type === '清洗') {
-      if (workOrder.status === '待清洗') return ['待清洗', '清洗中', '已完成', '已取消'];
-      if (workOrder.status === '清洗中') return ['清洗中', '已完成', '已取消'];
-    } else {
-      if (workOrder.status === '待维修') return ['待维修', '维修中', '已完成', '已取消'];
-      if (workOrder.status === '维修中') return ['维修中', '已完成', '已取消'];
-    }
-    return [workOrder.status];
-  }
-
-  function getUpcomingReservations(costumeId) {
-    return globalIndex.getUpcomingReservations(costumeId);
-  }
-
-  function getLatestReservation(costumeId) {
-    return globalIndex.getLatestReservation(costumeId);
-  }
-
   function openReserve(id) {
     reservingId = id;
-    reservationForm = { date: iso(1), type: '演员', reservedFor: '', note: '' };
+    reservationForm = createReservationInitialForm();
   }
 
   function closeReserve() {
     reservingId = null;
-    reservationForm = { date: iso(1), type: '演员', reservedFor: '', note: '' };
+    reservationForm = createReservationInitialForm();
   }
 
-  function confirmReserve() {
-    if (!reservationForm.reservedFor.trim() || !reservationForm.date) return;
-    const costume = globalIndex.getCostumeById(reservingId);
+  function closeLend() {
+    lendingId = null;
+    lendingBorrower = '';
+    lendingActorId = '';
+  }
+
+  function returnBack(id) {
+    const costume = globalIndex.getCostumeById(id);
     if (!costume) return;
-    const conflicts = checkConflict(reservingId, reservationForm.date);
-    if (conflicts.length > 0) return;
-    const reservation = {
-      id: crypto.randomUUID(),
-      costumeId: costume.id,
-      costumeName: costume.name,
-      play: costume.play,
-      date: reservationForm.date,
-      type: reservationForm.type,
-      reservedFor: reservationForm.reservedFor.trim(),
-      createdAt: new Date().toISOString(),
-      status: 'active',
-      note: reservationForm.note.trim()
-    };
-    reservations = [reservation, ...reservations];
-    persistReservations();
-    let recordSummary = `预约「${costume.name}」于${reservationForm.date}，${reservationForm.type}：${reservationForm.reservedFor.trim()}`;
-    if (reservationActor && reservationSizeMatch) {
-      recordSummary += `，尺码匹配：${reservationSizeMatch.label}`;
+    returnCostume(id, {
+      addRecordFn: addRecord,
+      createWorkOrderFn: woCreateWorkOrder
+    });
+  }
+
+  function updateClean(id, clean) {
+    const costume = globalIndex.getCostumeById(id);
+    if (!costume) return;
+    updateCostumeClean(id, clean, { addRecordFn: addRecord });
+  }
+
+  function handleSaveWorkOrder(e) {
+    const { workOrder } = e.detail || {};
+    if (workOrder) {
+      closeWorkOrderModal();
     }
-    addRecord('预约', costume, reservationForm.reservedFor.trim(), recordSummary);
+  }
+
+  function handleWorkOrderStatusUpdated(e) {
+    // Status updated from child component, no extra action needed
+  }
+
+  function handleReserved() {
     closeReserve();
   }
 
-  function cancelReservation(id) {
-    const reservation = globalIndex.getReservationById(id);
-    if (!reservation) return;
-    reservations = reservations.map((r) => r.id === id ? { ...r, status: 'cancelled' } : r);
-    persistReservations();
-    const costume = { name: reservation.costumeName, play: reservation.play };
-    addRecord('取消预约', costume, '系统', `取消「${reservation.costumeName}」于${reservation.date}的预约（${reservation.type}：${reservation.reservedFor}）`);
+  function handleLent() {
+    closeLend();
   }
 
-  function addRecord(type, costume, operator, summary) {
-    const record = {
-      id: crypto.randomUUID(),
-      timestamp: new Date().toISOString(),
-      type,
-      costumeName: costume.name,
-      play: costume.play,
-      operator,
-      summary
-    };
-    records = [record, ...records];
-    persistRecords();
+  function handleReservationCancelled() {
+    // No extra action needed
   }
 
   function parsePlaysString(playsStr) {
@@ -1408,18 +1129,7 @@
     refreshDBStats();
   }
 
-  function formatDateTime(isoString) {
-    const date = new Date(isoString);
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    const hours = String(date.getHours()).padStart(2, '0');
-    const minutes = String(date.getMinutes()).padStart(2, '0');
-    const seconds = String(date.getSeconds()).padStart(2, '0');
-    return `${year}-${month}-${day} ${hours}:${minutes}:${seconds}`;
-  }
-
-  $: plays = ['全部剧目', ...globalIndex.getUniqueCostumePlaysSorted()];
+  $: plays = (costumes, ['全部剧目', ...globalIndex.getUniqueCostumePlaysSorted()]);
   $: stats_overdueCount = $overdueCount;
   $: stats_borrowedCount = $borrowedCount;
   $: stats_cleanWaitCount = $cleanWaitCount;
@@ -1430,39 +1140,23 @@
   $: stats_overdueWorkOrderCount = $overdueWorkOrderCount;
   $: stats_scheduleCount = $scheduleCount;
   $: availableCostumesForWorkOrder = $costumesAvailableForWorkOrder;
-  $: filteredActors = globalIndex.filterActors({ query: actorQuery });
+  $: filteredActors = (actors, globalIndex.filterActors({ query: actorQuery }));
   $: selectedWorkOrder = globalIndex.getWorkOrderById(selectedWorkOrderId);
-  $: reservingCostume = globalIndex.getCostumeById(reservingId);
-  $: currentConflicts = reservingCostume ? globalIndex.checkScheduleConflict(reservingCostume.id, reservationForm.date) : [];
-  $: reservationActor = reservationForm.type === '演员' ? globalIndex.findActorByName(reservationForm.reservedFor) : null;
-  $: reservationActorSuggestions = reservationForm.type === '演员' ? globalIndex.searchActorsByName(reservationForm.reservedFor) : [];
-  $: reservationSizeMatch = reservingCostume && reservationActor ? matchSize(reservingCostume.size, reservationActor.size) : null;
-  $: reservationPlayMatch = reservingCostume && reservationActor ? checkPlayMatch(reservingCostume.play, reservationActor.plays) : null;
-  $: reservationActorHistory = reservationActor ? getActorCostumeHistory(reservationActor.name) : [];
   $: selectedActor = globalIndex.getActorById(selectedActorId);
-  $: lendingActor = globalIndex.getActorById(lendingActorId);
-  $: lendingActorByBorrower = globalIndex.findActorByName(lendingBorrower);
-  $: lendingActiveActor = lendingActor || lendingActorByBorrower;
-  $: lendingSizeMatch = lendingCostume && lendingActiveActor ? matchSize(lendingCostume.size, lendingActiveActor.size) : null;
-  $: lendingPlayMatch = lendingCostume && lendingActiveActor ? checkPlayMatch(lendingCostume.play, lendingActiveActor.plays) : null;
-  $: lendingBorrowerSuggestions = globalIndex.searchActorsByName(lendingBorrower);
-  $: lendingActorHistory = lendingActiveActor ? getActorCostumeHistory(lendingActiveActor.name) : [];
   $: selectedPackingList = globalIndex.getPackingListById(selectedPackingListId);
-  $: packingPlays = ['全部剧目', ...globalIndex.getUniqueCostumePlaysSorted()];
+  $: packingPlays = (costumes, ['全部剧目', ...globalIndex.getUniqueCostumePlaysSorted()]);
   $: packingSummary = selectedPackingList ? globalIndex.getPackingListSummary(selectedPackingListId) : null;
-  $: packingAddAvailableCostumes = globalIndex.filterCostumesForPackingList({
+  $: packingAddAvailableCostumes = (costumes, globalIndex.filterCostumesForPackingList({
     query: packingAddCostumeQuery,
     play: packingAddCostumePlayFilter === '全部剧目' ? undefined : packingAddCostumePlayFilter,
     excludeItemIds: packingListForm.items.map((item) => item.costumeId)
-  });
+  }));
 
   function saveCostume() {
-    if (!form.name.trim() || !form.play.trim()) return;
-    const newCostume = { id: crypto.randomUUID(), ...form };
-    costumes = [newCostume, ...costumes];
-    persist();
-    addRecord('新增', newCostume, '系统', `新增服装「${newCostume.name}」，剧目：${newCostume.play}，尺码：${newCostume.size || '未填'}，位置：${newCostume.location || '未填'}`);
-    form = { name: '', size: '', play: '', location: '', clean: '已清洗', borrower: '', due: '', status: '在库', note: '' };
+    const result = recSaveCostume(form, { addRecordFn: addRecord });
+    if (result) {
+      form = { name: '', size: '', play: '', location: '', clean: '已清洗', borrower: '', due: '', status: '在库', note: '' };
+    }
   }
 
   function openLend(id) {
@@ -1474,55 +1168,6 @@
     lendingId = id;
     lendingBorrower = '';
     lendingActorId = '';
-  }
-
-  function closeLend() {
-    lendingId = null;
-    lendingBorrower = '';
-    lendingActorId = '';
-  }
-
-  function confirmLend() {
-    let borrower = lendingBorrower.trim();
-    if (!borrower && lendingActor) {
-      borrower = lendingActor.name;
-    }
-    if (!borrower) return;
-    const costume = globalIndex.getCostumeById(lendingId);
-    if (!costume) return;
-    const checkResult = canLend(lendingId);
-    if (!checkResult.can) {
-      alert(checkResult.reason);
-      return;
-    }
-    const dueDate = iso(7);
-    costumes = costumes.map((c) => c.id === lendingId ? { ...c, borrower, due: dueDate, status: '借出' } : c);
-    persist();
-    let summary = `借出「${costume.name}」给${borrower}，应还日期：${dueDate}`;
-    if (lendingActiveActor && lendingSizeMatch) {
-      summary += `，尺码匹配：${lendingSizeMatch.label}`;
-    }
-    addRecord('借出', costume, borrower, summary);
-    closeLend();
-  }
-
-  function returnBack(id) {
-    const costume = globalIndex.getCostumeById(id);
-    if (!costume) return;
-    const borrower = costume.borrower;
-    costumes = costumes.map((c) => c.id === id ? { ...c, borrower: '', due: '', status: '在库', clean: '待清洗' } : c);
-    persist();
-    addRecord('归还', costume, borrower, `${borrower}归还「${costume.name}」，状态变更为待清洗`);
-    createWorkOrder('清洗', costume, '张阿姨', `${borrower}归还后自动生成清洗工单`);
-  }
-
-  function updateClean(id, clean) {
-    const costume = globalIndex.getCostumeById(id);
-    if (!costume) return;
-    const oldClean = costume.clean;
-    costumes = costumes.map((c) => c.id === id ? { ...c, clean } : c);
-    persist();
-    addRecord('清洗', costume, '系统', `「${costume.name}」清洗状态从「${oldClean}」变更为「${clean}」`);
   }
 
   function openDetail(item) {
@@ -1648,7 +1293,6 @@
   }
 
   $: selected = globalIndex.getCostumeById(selectedId);
-  $: lendingCostume = globalIndex.getCostumeById(lendingId);
 
   function handleModalKeydown(e) {
     if (e.key === 'Escape') {
@@ -2000,208 +1644,26 @@
     <p class="hint">「完整备份」包含服装、借还记录、预约、工单、演员、装箱单、盘点等所有数据；「仅导服装」只导出服装档案，兼容旧版导入格式。</p>
   </section>
 
-  <section class="panel">
-    <div class="record-header">
-      <h2><Wrench size={18} />清洗与维修工单</h2>
-      <div style="display: flex; gap: 10px; align-items: center;">
-        <span class="record-count">共 {filteredWorkOrders.length} 条</span>
-        <button type="button" class="small-btn" on:click={() => openCreateWorkOrder(null, '维修')}>
-          <Plus size={14} />新建工单
-        </button>
-      </div>
-    </div>
-    <div class="record-toolbar">
-      <label><Search size={16} /><input bind:value={workOrderQuery} placeholder="搜索服装/剧目/负责人" /></label>
-      <div style="display: flex; gap: 8px;">
-        <select bind:value={workOrderTypeFilter}>
-          <option>全部</option>
-          <option>清洗</option>
-          <option>维修</option>
-        </select>
-        <select bind:value={workOrderFilter}>
-          <option>全部</option>
-          <option>待处理</option>
-          <option>处理中</option>
-          <option>已完成</option>
-          <option>已取消</option>
-          <option>已逾期</option>
-        </select>
-      </div>
-    </div>
-    <div class="record-list">
-      {#each filteredWorkOrders as workOrder}
-        {@const isOverdue = (workOrder.status === '待清洗' || workOrder.status === '清洗中' || workOrder.status === '待维修' || workOrder.status === '维修中') && workOrder.dueDate && new Date(workOrder.dueDate) < new Date(iso(0))}
-        <div class="record-item" class:record-cancelled={workOrder.status === '已取消'} class:record-overdue={isOverdue}>
-          <div class="record-type-badge record-type-{workOrder.type}">
-            {#if workOrder.type === '清洗'}
-              <Droplets size={14} />
-            {:else}
-              <Wrench size={14} />
-            {/if}
-            {workOrder.type}
-          </div>
-          <div class="record-content">
-            <div class="record-title-row">
-              <strong class="record-name">{workOrder.costumeName}</strong>
-              <span class="record-play-tag">{workOrder.play}</span>
-              <span class="record-play-tag reservation-date-tag"><Calendar size={12} />截止：{workOrder.dueDate}</span>
-              <span class="record-play-tag" style="background: {workOrder.status === '已完成' ? '#e6f0e6' : workOrder.status === '已取消' ? '#f6e6e6' : isOverdue ? '#fff4e6' : '#e6eef6'}; color: {workOrder.status === '已完成' ? '#2d5a2d' : workOrder.status === '已取消' ? '#8a2d2d' : isOverdue ? '#8a5a1a' : '#1a4a8a'};">
-                {workOrder.status}
-              </span>
-            </div>
-            <p class="record-summary">
-              负责人：{workOrder.assignee || '未分配'}
-              {#if workOrder.note} · 备注：{workOrder.note}{/if}
-            </p>
-            <div class="record-footer">
-              <span class="record-operator">创建时间：{formatDateTime(workOrder.createdAt)}</span>
-              <div style="display: flex; gap: 6px;">
-                {#if workOrder.status !== '已完成' && workOrder.status !== '已取消'}
-                  {#each getAvailableStatuses(workOrder).filter((s) => s !== workOrder.status) as status}
-                    <button type="button" class="small-btn" on:click={() => updateWorkOrderStatus(workOrder.id, status)}>
-                      {status}
-                    </button>
-                  {/each}
-                {/if}
-                <button type="button" class="secondary small-btn" on:click={() => openEditWorkOrder(workOrder.id)}>
-                  <Save size={12} />编辑
-                </button>
-                <button type="button" class="secondary small-btn" on:click={() => openWorkOrderDetail(workOrder.id)}>
-                  <Eye size={12} />详情
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      {/each}
-      {#if filteredWorkOrders.length === 0}
-        <div class="record-empty">
-          <Wrench size={32} />
-          <p>暂无工单</p>
-          <span>服装归还时将自动生成清洗工单，或点击「新建工单」创建维修工单</span>
-        </div>
-      {/if}
-    </div>
-  </section>
+  <WorkOrderPanel
+    bind:workOrderQuery
+    bind:workOrderFilter
+    bind:workOrderTypeFilter
+    on:open-create={(e) => openCreateWorkOrder(e.detail?.costumeId, e.detail?.type || '维修')}
+    on:open-edit={(e) => openEditWorkOrder(e.detail?.id)}
+    on:open-detail={(e) => openWorkOrderDetail(e.detail?.id)}
+    on:status-updated={handleWorkOrderStatusUpdated}
+  />
 
-  <section class="panel">
-    <div class="record-header">
-      <h2><CalendarDays size={18} />排练预约</h2>
-      <span class="record-count">共 {filteredReservations.length} 条</span>
-    </div>
-    <div class="record-toolbar">
-      <label><Search size={16} /><input bind:value={reservationQuery} placeholder="搜索服装/剧目/预约方" /></label>
-      <select bind:value={reservationFilter}>
-        <option>全部</option>
-        <option>有效</option>
-        <option>即将到来</option>
-        <option>已过期</option>
-        <option>已取消</option>
-      </select>
-    </div>
-    <div class="record-list">
-      {#each filteredReservations as reservation}
-        <div class="record-item" class:record-cancelled={reservation.status === 'cancelled'} class:record-overdue={reservation.status === 'active' && reservation.date < iso(0)}>
-          <div class="record-type-badge record-type-{reservation.status === 'cancelled' ? '取消预约' : (reservation.date < iso(0) ? '已过期' : '预约')}">
-            {#if reservation.status === 'cancelled'}
-              <XCircle size={14} />
-              已取消
-            {:else if reservation.date < iso(0)}
-              <AlertTriangle size={14} />
-              已过期
-            {:else}
-              <Calendar size={14} />
-              预约
-            {/if}
-          </div>
-          <div class="record-content">
-            <div class="record-title-row">
-              <strong class="record-name">{reservation.costumeName}</strong>
-              <span class="record-play-tag">{reservation.play}</span>
-              <span class="record-play-tag reservation-date-tag"><Calendar size={12} />{reservation.date}</span>
-            </div>
-            <p class="record-summary">
-              {reservation.type === '演员' ? '演员' : '场次'}：{reservation.reservedFor}
-              {#if reservation.note} · 备注：{reservation.note}{/if}
-            </p>
-            <div class="record-footer">
-              <span class="record-operator">创建时间：{formatDateTime(reservation.createdAt)}</span>
-              {#if reservation.status === 'active'}
-                <button type="button" class="danger-outline small-btn" on:click={() => cancelReservation(reservation.id)}>
-                  <XCircle size={12} />取消预约
-                </button>
-              {/if}
-            </div>
-          </div>
-        </div>
-      {/each}
-      {#if filteredReservations.length === 0}
-        <div class="record-empty">
-          <CalendarDays size={32} />
-          <p>暂无预约</p>
-          <span>点击服装卡片上的「预约」按钮创建新预约</span>
-        </div>
-      {/if}
-    </div>
-  </section>
+  <ReservationPanel
+    bind:reservationQuery
+    bind:reservationFilter
+    on:cancelled={handleReservationCancelled}
+  />
 
-  <section class="panel">
-    <div class="record-header">
-      <h2><List size={18} />借还记录</h2>
-      <span class="record-count">共 {records.length} 条记录</span>
-    </div>
-    <div class="record-toolbar">
-      <label><Search size={16} /><input bind:value={recordQuery} placeholder="搜索服装名称或剧目" /></label>
-    </div>
-    <div class="record-list">
-      {#each filteredRecords as record}
-        <div class="record-item">
-          <div class="record-type-badge record-type-{record.type}">
-            {#if record.type === '新增'}
-              <Plus size={14} />
-            {:else if record.type === '借出'}
-              <Clock size={14} />
-            {:else if record.type === '归还'}
-              <Undo2 size={14} />
-            {:else if record.type === '清洗'}
-              <RotateCcw size={14} />
-            {:else if record.type === '预约'}
-              <Calendar size={14} />
-            {:else if record.type === '取消预约'}
-              <XCircle size={14} />
-            {:else if record.type === '工单创建'}
-              <Plus size={14} />
-            {:else if record.type === '工单更新'}
-              <Wrench size={14} />
-            {:else if record.type === '装箱单创建'}
-              <Package size={14} />
-            {:else if record.type === '装箱单删除'}
-              <Trash2 size={14} />
-            {/if}
-            {record.type}
-          </div>
-          <div class="record-content">
-            <div class="record-title-row">
-              <strong class="record-name">{record.costumeName}</strong>
-              <span class="record-play-tag">{record.play}</span>
-            </div>
-            <p class="record-summary">{record.summary}</p>
-            <div class="record-footer">
-              <span class="record-operator">操作者：{record.operator}</span>
-              <span class="record-time">{formatDateTime(record.timestamp)}</span>
-            </div>
-          </div>
-        </div>
-      {/each}
-      {#if filteredRecords.length === 0}
-        <div class="record-empty">
-          <List size={32} />
-          <p>暂无记录</p>
-          <span>进行操作后记录将显示在这里</span>
-        </div>
-      {/if}
-    </div>
-  </section>
+  <RecordsPanel
+    bind:recordQuery
+    {records}
+  />
 
   <section class="panel">
     <div class="record-header">
@@ -2483,297 +1945,22 @@
     </div>
   {/if}
 
-  {#if lendingCostume}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modal-overlay" role="presentation" on:click={closeLend}>
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div
-        class="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="lend-title"
-        on:click|stopPropagation
-        on:keydown={handleModalKeydown}
-        tabindex="-1"
-      >
-        <div class="modal-header">
-          <h2 id="lend-title">借出服装</h2>
-          <button type="button" class="icon-btn" on:click={closeLend} aria-label="关闭"><X size={20} /></button>
-        </div>
-        <form class="lend-form" on:submit|preventDefault={confirmLend}>
-          <div class="status-info">
-            <p><strong>服装：</strong>{lendingCostume.name}</p>
-            <p><strong>剧目：</strong>{lendingCostume.play}</p>
-            <p><strong>服装尺码：</strong>{lendingCostume.size || '未填'}</p>
-            <p><strong>应还日期：</strong>{iso(7)}</p>
-          </div>
-          <label>
-            <span>选择演员（可选）</span>
-            <select bind:value={lendingActorId} on:change={() => {
-              if (lendingActorId) {
-                const a = getActorById(lendingActorId);
-                if (a) lendingBorrower = a.name;
-              }
-            }}>
-              <option value="">不选择演员，手动输入借用人</option>
-              {#each actors as actor}
-                <option value={actor.id}>{actor.name} ({actor.size || '未填尺码'})</option>
-              {/each}
-            </select>
-          </label>
-          <label>
-            <span>借用人</span>
-            <input bind:value={lendingBorrower} placeholder="请输入借用人姓名" required />
-            {#if lendingBorrowerSuggestions.length > 0 && !lendingActorId && (lendingActorByBorrower?.name !== lendingBorrower.trim())}
-              <div class="actor-suggest-box">
-                {#each lendingBorrowerSuggestions.slice(0, 3) as sugg}
-                  <button type="button" class="actor-suggest-item" on:click={() => {
-                    lendingActorId = sugg.id;
-                    lendingBorrower = sugg.name;
-                  }}>
-                    <User size={14} />
-                    <span>{sugg.name}</span>
-                    <span class="actor-suggest-size">{sugg.size || '未填尺码'}</span>
-                  </button>
-                {/each}
-              </div>
-            {/if}
-          </label>
+  <LendModal
+    costumeId={lendingId}
+    bind:lendingBorrower
+    bind:lendingActorId
+    handleModalKeydown={handleModalKeydown}
+    on:close={closeLend}
+    on:lent={handleLent}
+  />
 
-          {#if lendingActiveActor}
-            <div class="actor-match-panel">
-              <div class="actor-match-header">
-                <User size={16} />
-                <strong>演员档案：{lendingActiveActor.name}</strong>
-                {#if lendingActiveActor.size}
-                  <span class="match-badge {getMatchBadgeClass(lendingSizeMatch?.level)}">{lendingSizeMatch?.label || lendingActiveActor.size}</span>
-                {/if}
-              </div>
-
-              {#if lendingSizeMatch}
-                <div class="size-match-row" class:match-perfect={lendingSizeMatch.level === 'perfect'} class:match-close={lendingSizeMatch.level === 'loose' || lendingSizeMatch.level === 'tight'} class:match-mismatch={lendingSizeMatch.level === 'mismatch'} class:match-unknown={lendingSizeMatch.level === 'unknown'}>
-                  {#if lendingSizeMatch.level === 'perfect'}
-                    <CheckCircle size={14} />
-                  {:else if lendingSizeMatch.level === 'loose' || lendingSizeMatch.level === 'tight'}
-                    <AlertTriangle size={14} />
-                  {:else if lendingSizeMatch.level === 'mismatch'}
-                    <XCircle size={14} />
-                  {:else}
-                    <AlertTriangle size={14} />
-                  {/if}
-                  <span>尺码：服装 {lendingCostume.size || '未填'} / 演员 {lendingActiveActor.size || '未填'} — {lendingSizeMatch.label}</span>
-                </div>
-              {/if}
-
-              {#if lendingPlayMatch}
-                <div class="size-match-row" class:play-match={lendingPlayMatch.match} class:play-mismatch={!lendingPlayMatch.match}>
-                  {#if lendingPlayMatch.match}
-                    <CheckCircle size={14} />
-                  {:else}
-                    <AlertTriangle size={14} />
-                  {/if}
-                  <span>剧目：{lendingPlayMatch.label}</span>
-                </div>
-              {/if}
-
-              {#if lendingActiveActor.plays && lendingActiveActor.plays.length > 0}
-                <div class="actor-plays-row">
-                  <span class="label">参演剧目：</span>
-                  <div class="actor-plays-tags">
-                    {#each lendingActiveActor.plays as play}
-                      <span class="record-play-tag">{play}</span>
-                    {/each}
-                  </div>
-                </div>
-              {/if}
-
-              {#if lendingActiveActor.note}
-                <div class="actor-note-row">
-                  <span class="label">备注：</span>
-                  <span>{lendingActiveActor.note}</span>
-                </div>
-              {/if}
-
-              {#if lendingActorHistory.length > 0}
-                <div class="actor-history-section">
-                  <div class="actor-history-title">
-                    <Clock size={14} />
-                    <span>历史使用服装</span>
-                  </div>
-                  <div class="actor-history-list">
-                    {#each lendingActorHistory.slice(0, 5) as hist}
-                      <div class="actor-history-item">
-                        <span class="history-costume-name">{hist.name}</span>
-                        <span class="history-play-tag">{hist.play}</span>
-                      </div>
-                    {/each}
-                  </div>
-                </div>
-              {/if}
-            </div>
-          {/if}
-          <div class="modal-actions">
-            <button type="button" class="secondary" on:click={closeLend}>取消</button>
-            <button type="submit" disabled={!lendingBorrower.trim()}><Clock size={16} />确认借出</button>
-          </div>
-        </form>
-      </div>
-    </div>
-  {/if}
-
-  {#if reservingCostume}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modal-overlay" role="presentation" on:click={closeReserve}>
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div
-        class="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="reserve-title"
-        on:click|stopPropagation
-        on:keydown={handleModalKeydown}
-        tabindex="-1"
-      >
-        <div class="modal-header">
-          <h2 id="reserve-title">预约服装</h2>
-          <button type="button" class="icon-btn" on:click={closeReserve} aria-label="关闭"><X size={20} /></button>
-        </div>
-        <form class="lend-form" on:submit|preventDefault={confirmReserve}>
-          <div class="status-info">
-            <p><strong>服装：</strong>{reservingCostume.name}</p>
-            <p><strong>剧目：</strong>{reservingCostume.play}</p>
-            {#if reservingCostume.status === '借出'}
-              <p><strong>当前状态：</strong>借出中（{reservingCostume.borrower}借用至{reservingCostume.due}）</p>
-            {/if}
-          </div>
-          <label>
-            <span>预约日期</span>
-            <input type="date" bind:value={reservationForm.date} min={iso(0)} required />
-          </label>
-          <label>
-            <span>预约类型</span>
-            <select bind:value={reservationForm.type}>
-              <option value="演员">演员</option>
-              <option value="场次">排练场次</option>
-            </select>
-          </label>
-          <label>
-            <span>{reservationForm.type === '演员' ? '演员姓名' : '场次名称'}</span>
-            <input bind:value={reservationForm.reservedFor} placeholder={reservationForm.type === '演员' ? '请输入演员姓名' : '请输入场次名称'} required />
-            {#if reservationForm.type === '演员' && reservationActorSuggestions.length > 0 && !reservationActor}
-              <div class="actor-suggest-box">
-                {#each reservationActorSuggestions.slice(0, 3) as sugg}
-                  <button type="button" class="actor-suggest-item" on:click={() => {
-                    reservationForm.reservedFor = sugg.name;
-                  }}>
-                    <User size={14} />
-                    <span>{sugg.name}</span>
-                    <span class="actor-suggest-size">{sugg.size || '未填尺码'}</span>
-                  </button>
-                {/each}
-              </div>
-            {/if}
-          </label>
-          <label>
-            <span>备注</span>
-            <input bind:value={reservationForm.note} placeholder="选填" />
-          </label>
-
-          {#if reservationForm.type === '演员' && reservationActor}
-            <div class="actor-match-panel">
-              <div class="actor-match-header">
-                <User size={16} />
-                <strong>演员档案：{reservationActor.name}</strong>
-                {#if reservationActor.size}
-                  <span class="match-badge {getMatchBadgeClass(reservationSizeMatch?.level)}">{reservationSizeMatch?.label || reservationActor.size}</span>
-                {/if}
-              </div>
-
-              {#if reservationSizeMatch}
-                <div class="size-match-row" class:match-perfect={reservationSizeMatch.level === 'perfect'} class:match-close={reservationSizeMatch.level === 'loose' || reservationSizeMatch.level === 'tight'} class:match-mismatch={reservationSizeMatch.level === 'mismatch'} class:match-unknown={reservationSizeMatch.level === 'unknown'}>
-                  {#if reservationSizeMatch.level === 'perfect'}
-                    <CheckCircle size={14} />
-                  {:else if reservationSizeMatch.level === 'loose' || reservationSizeMatch.level === 'tight'}
-                    <AlertTriangle size={14} />
-                  {:else if reservationSizeMatch.level === 'mismatch'}
-                    <XCircle size={14} />
-                  {:else}
-                    <AlertTriangle size={14} />
-                  {/if}
-                  <span>尺码：服装 {reservingCostume.size || '未填'} / 演员 {reservationActor.size || '未填'} — {reservationSizeMatch.label}</span>
-                </div>
-              {/if}
-
-              {#if reservationPlayMatch}
-                <div class="size-match-row" class:play-match={reservationPlayMatch.match} class:play-mismatch={!reservationPlayMatch.match}>
-                  {#if reservationPlayMatch.match}
-                    <CheckCircle size={14} />
-                  {:else}
-                    <AlertTriangle size={14} />
-                  {/if}
-                  <span>剧目：{reservationPlayMatch.label}</span>
-                </div>
-              {/if}
-
-              {#if reservationActor.plays && reservationActor.plays.length > 0}
-                <div class="actor-plays-row">
-                  <span class="label">参演剧目：</span>
-                  <div class="actor-plays-tags">
-                    {#each reservationActor.plays as play}
-                      <span class="record-play-tag">{play}</span>
-                    {/each}
-                  </div>
-                </div>
-              {/if}
-
-              {#if reservationActor.note}
-                <div class="actor-note-row">
-                  <span class="label">备注：</span>
-                  <span>{reservationActor.note}</span>
-                </div>
-              {/if}
-
-              {#if reservationActorHistory.length > 0}
-                <div class="actor-history-section">
-                  <div class="actor-history-title">
-                    <Clock size={14} />
-                    <span>历史使用服装</span>
-                  </div>
-                  <div class="actor-history-list">
-                    {#each reservationActorHistory.slice(0, 5) as hist}
-                      <div class="actor-history-item">
-                        <span class="history-costume-name">{hist.name}</span>
-                        <span class="history-play-tag">{hist.play}</span>
-                      </div>
-                    {/each}
-                  </div>
-                </div>
-              {/if}
-            </div>
-          {/if}
-
-          {#if currentConflicts.length > 0}
-            <div class="conflict-box">
-              <div class="conflict-title">
-                <AlertTriangle size={16} />
-                <strong>该日期存在冲突</strong>
-              </div>
-              {#each currentConflicts as conflict}
-                <p class="conflict-item">· {conflict.type}：{conflict.detail}</p>
-              {/each}
-            </div>
-          {/if}
-
-          <div class="modal-actions">
-            <button type="button" class="secondary" on:click={closeReserve}>取消</button>
-            <button type="submit" disabled={!reservationForm.reservedFor.trim() || !reservationForm.date || currentConflicts.length > 0}>
-              <Calendar size={16} />确认预约
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  {/if}
+  <ReserveModal
+    costumeId={reservingId}
+    bind:reservationForm
+    handleModalKeydown={handleModalKeydown}
+    on:close={closeReserve}
+    on:reserved={handleReserved}
+  />
 
   {#if showImportModal}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
@@ -2850,157 +2037,23 @@
     </div>
   {/if}
 
-  {#if showWorkOrderModal}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modal-overlay" role="presentation" on:click={closeWorkOrderModal}>
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div
-        class="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="workorder-title"
-        on:click|stopPropagation
-        on:keydown={handleModalKeydown}
-        tabindex="-1"
-      >
-        <div class="modal-header">
-          <h2 id="workorder-title">
-            {creatingWorkOrder ? '新建工单' : '编辑工单'}
-          </h2>
-          <button type="button" class="icon-btn" on:click={closeWorkOrderModal} aria-label="关闭"><X size={20} /></button>
-        </div>
-        <form class="lend-form" on:submit|preventDefault={saveWorkOrder}>
-          <label>
-            <span>工单类型</span>
-            <select bind:value={workOrderForm.type} disabled={!creatingWorkOrder} on:change={() => {
-              if (workOrderForm.type === '清洗') {
-                workOrderForm.status = workOrderForm.status === '维修中' ? '清洗中' : '待清洗';
-                if (!workOrderForm.assignee) workOrderForm.assignee = '张阿姨';
-              } else {
-                workOrderForm.status = workOrderForm.status === '清洗中' ? '维修中' : '待维修';
-                if (!workOrderForm.assignee) workOrderForm.assignee = '李师傅';
-              }
-            }}>
-              <option value="清洗">清洗</option>
-              <option value="维修">维修</option>
-            </select>
-          </label>
-          <label>
-            <span>选择服装</span>
-            <select bind:value={workOrderForm.costumeId} disabled={!creatingWorkOrder} on:change={() => {
-              const c = globalIndex.getCostumeById(workOrderForm.costumeId);
-              if (c) {
-                workOrderForm.costumeName = c.name;
-                workOrderForm.play = c.play;
-              }
-            }}>
-              <option value="">请选择服装</option>
-              {#each availableCostumesForWorkOrder as costume}
-                <option value={costume.id}>{costume.name} ({costume.play})</option>
-              {/each}
-            </select>
-          </label>
-          {#if workOrderForm.costumeId}
-            <div class="status-info">
-              <p><strong>服装：</strong>{workOrderForm.costumeName}</p>
-              <p><strong>剧目：</strong>{workOrderForm.play}</p>
-            </div>
-          {/if}
-          <label>
-            <span>当前状态</span>
-            <select bind:value={workOrderForm.status}>
-              {#each getAvailableStatuses(workOrderForm) as status}
-                <option>{status}</option>
-              {/each}
-            </select>
-          </label>
-          <label>
-            <span>负责人</span>
-            <input bind:value={workOrderForm.assignee} placeholder="请输入负责人姓名" required />
-          </label>
-          <label>
-            <span>截止日期</span>
-            <input type="date" bind:value={workOrderForm.dueDate} required />
-          </label>
-          <label>
-            <span>备注</span>
-            <input bind:value={workOrderForm.note} placeholder="选填，描述问题或特殊要求" />
-          </label>
-          <div class="modal-actions">
-            <button type="button" class="secondary" on:click={closeWorkOrderModal}>取消</button>
-            <button type="submit" disabled={!workOrderForm.costumeId || !workOrderForm.assignee.trim()}>
-              <Save size={16} />{creatingWorkOrder ? '创建工单' : '保存修改'}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  {/if}
+  <WorkOrderFormModal
+    show={showWorkOrderModal}
+    creating={creatingWorkOrder}
+    editingId={editingWorkOrderId}
+    bind:workOrderForm
+    handleModalKeydown={handleModalKeydown}
+    on:close={closeWorkOrderModal}
+    on:saved={handleSaveWorkOrder}
+  />
 
-  {#if selectedWorkOrder}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="modal-overlay" role="presentation" on:click={closeWorkOrderDetail}>
-      <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-      <div
-        class="modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="workorder-detail-title"
-        on:click|stopPropagation
-        on:keydown={handleModalKeydown}
-        tabindex="-1"
-      >
-        <div class="modal-header">
-          <h2 id="workorder-detail-title">工单详情</h2>
-          <button type="button" class="icon-btn" on:click={closeWorkOrderDetail} aria-label="关闭"><X size={20} /></button>
-        </div>
-        <div class="detail-form">
-          <div class="status-info">
-            <p><strong>工单编号：</strong>{selectedWorkOrder.id.slice(0, 8)}</p>
-            <p><strong>工单类型：</strong>{selectedWorkOrder.type}</p>
-            <p><strong>当前状态：</strong>{selectedWorkOrder.status}</p>
-          </div>
-          <div class="status-info">
-            <p><strong>服装：</strong>{selectedWorkOrder.costumeName}</p>
-            <p><strong>剧目：</strong>{selectedWorkOrder.play}</p>
-          </div>
-          <div class="status-info">
-            <p><strong>负责人：</strong>{selectedWorkOrder.assignee || '未分配'}</p>
-            <p><strong>截止日期：</strong>{selectedWorkOrder.dueDate}</p>
-            <p><strong>创建时间：</strong>{formatDateTime(selectedWorkOrder.createdAt)}</p>
-            <p><strong>更新时间：</strong>{formatDateTime(selectedWorkOrder.updatedAt)}</p>
-          </div>
-          {#if selectedWorkOrder.note}
-            <div class="status-info">
-              <p><strong>备注：</strong>{selectedWorkOrder.note}</p>
-            </div>
-          {/if}
-
-          {#if selectedWorkOrder.status !== '已完成' && selectedWorkOrder.status !== '已取消'}
-            <div class="status-info">
-              <p style="margin-bottom: 8px;"><strong>状态流转：</strong></p>
-              <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-                {#each getAvailableStatuses(selectedWorkOrder).filter((s) => s !== selectedWorkOrder.status) as status}
-                  <button type="button" on:click={() => updateWorkOrderStatus(selectedWorkOrder.id, status)}>
-                    {status}
-                  </button>
-                {/each}
-              </div>
-            </div>
-          {/if}
-
-          <div class="modal-actions">
-            <button type="button" class="secondary" on:click={() => { closeWorkOrderDetail(); openEditWorkOrder(selectedWorkOrder.id); }}>
-              <Save size={16} />编辑工单
-            </button>
-            <button type="button" on:click={closeWorkOrderDetail}>
-              关闭
-            </button>
-          </div>
-        </div>
-      </div>
-    </div>
-  {/if}
+  <WorkOrderDetailModal
+    workOrder={selectedWorkOrder}
+    handleModalKeydown={handleModalKeydown}
+    on:close={closeWorkOrderDetail}
+    on:open-edit={(e) => { closeWorkOrderDetail(); openEditWorkOrder(e.detail?.id); }}
+    on:status-updated={handleWorkOrderStatusUpdated}
+  />
 
   {#if showPackingListModal}
     <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
