@@ -427,7 +427,7 @@
               </span>
             </div>
             <div class="rc-risk-list">
-              {#each risks as risk (risk.riskKey)}
+              {#each risks as risk, index (`${risk.riskKey}-${index}`)}
                 <div class="rc-risk-card {getRiskLevelClass(risk.level)}" class:rc-card-resolved={risk.processingStatus === RISK_STATUS.RESOLVED}>
                   <div class="rc-risk-main">
                     <div class="rc-risk-top">
@@ -1112,7 +1112,7 @@
           <div class="rc-detail-section">
             <h3><AlertTriangle size={14} />相关风险状态变化</h3>
             <div class="rc-preview-risk-list">
-              {#each currentPreview.riskImpacts as ri (ri.riskKey)}
+              {#each currentPreview.riskImpacts as ri, index (`${ri.riskKey}-${index}`)}
                 <div class="rc-preview-risk-item" class:rc-preview-risk-resolve={ri.impact === 'resolve'} class:rc-preview-risk-introduce={ri.impact === 'introduce'}>
                   <div class="rc-preview-risk-icon">
                     {#if ri.impact === 'resolve'}

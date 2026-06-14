@@ -38,7 +38,6 @@
   export let reservations = [];
   export let workOrders = [];
   export let packingLists = [];
-  export let actors = [];
 
   const dispatch = createEventDispatcher();
 

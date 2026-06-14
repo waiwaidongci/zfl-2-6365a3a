@@ -1771,7 +1771,6 @@
         {reservations}
         {workOrders}
         {packingLists}
-        {actors}
         on:change={handleScheduleChange}
         on:generate-packing-list={handleGeneratePackingListFromSchedule}
         on:suggestion-applied={handleSuggestionApplied}
