@@ -1,4 +1,4 @@
-import { TABLES, EVENT_TYPES, EVENT_TYPE_LABELS, getDeviceEventTimelines, hasTombstone, SOFT_DELETE_TABLES } from '$lib/database.js';
+import { TABLES, TABLE_LABELS, EVENT_TYPES, EVENT_TYPE_LABELS, getDeviceEventTimelines, hasTombstone, SOFT_DELETE_TABLES } from '$lib/database.js';
 
 export const DIFF_TYPES = {
   ADDED: 'added',

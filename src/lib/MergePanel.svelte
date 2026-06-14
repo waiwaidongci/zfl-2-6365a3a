@@ -715,18 +715,19 @@
                 >
                   全部级别
                 </button>
-                {#each Object.keys(RISK_LEVELS) as rl}
+                {#each Object.entries(RISK_LEVELS) as [riskKey, riskValue]}
                   <button
                     type="button"
-                    class="scope-chip {batchScope.riskLevels?.includes(rl) ? 'active' : ''}"
+                    class="scope-chip {batchScope.riskLevels?.includes(riskValue) ? 'active' : ''}"
                     on:click={() => {
                       const cur = batchScope.riskLevels || [];
-                      batchScope.riskLevels = cur.includes(rl)
-                        ? cur.filter(r => r !== rl).length === 0 ? null : cur.filter(r => r !== rl)
-                        : [...cur, rl];
+                      const next = cur.includes(riskValue)
+                        ? cur.filter(r => r !== riskValue)
+                        : [...cur, riskValue];
+                      batchScope.riskLevels = next.length === 0 ? null : next;
                     }}
                   >
-                    {RISK_LEVEL_LABELS[rl]}
+                    {RISK_LEVEL_LABELS[riskValue] || riskKey}
                   </button>
                 {/each}
               </div>
