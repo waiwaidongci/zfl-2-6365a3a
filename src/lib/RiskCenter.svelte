@@ -5,7 +5,7 @@
     CalendarDays, Filter, ChevronDown, ChevronUp, Eye, User, MessageSquare,
     CheckCircle2, PauseCircle, XCircle, ArrowRight, ArrowRightLeft,
     Shirt, Zap, Wrench, Droplets, Package, MoreHorizontal, Edit3,
-    ThumbsUp, SkipForward, RotateCcw
+    ThumbsUp, SkipForward, RotateCcw, ClipboardList, AlertCircle
   } from 'lucide-svelte';
   import {
     updateRiskProcessingStatus,
@@ -17,6 +17,7 @@
     computeAllSuggestions,
     filterSuggestions,
     applyScheduleSuggestion,
+    previewScheduleSuggestion,
     confirmSuggestionOnly,
     deferSuggestion,
     SUGGESTION_STATUS,
@@ -54,6 +55,11 @@
   let editingSuggestionNote = false;
   let suggestionNoteForm = { handler: '', note: '' };
   let selectedAltCostumeId = null;
+
+  let showPreviewModal = false;
+  let currentPreview = null;
+  let previewUpdatePackingList = true;
+  let previewLoading = false;
 
   $: allRisks = $globalIndex.computeAllRisks();
   $: riskStats = $globalIndex.getRiskStats(allRisks);
@@ -156,14 +162,42 @@
 
   function handleApplySuggestion() {
     if (!selectedSuggestion) return;
+    previewLoading = true;
+    previewUpdatePackingList = true;
+    currentPreview = previewScheduleSuggestion(selectedSuggestion.suggestionId, {
+      applyAlternative: selectedAltCostumeId,
+      updatePackingList: true
+    });
+    previewLoading = false;
+    showPreviewModal = true;
+  }
+
+  function handlePreviewTogglePacking(ev) {
+    if (!selectedSuggestion) return;
+    previewUpdatePackingList = ev.target.checked;
+    currentPreview = previewScheduleSuggestion(selectedSuggestion.suggestionId, {
+      applyAlternative: selectedAltCostumeId,
+      updatePackingList: previewUpdatePackingList
+    });
+  }
+
+  function handlePreviewConfirm() {
+    if (!selectedSuggestion) return;
     const result = applyScheduleSuggestion(selectedSuggestion.suggestionId, {
       applyAlternative: selectedAltCostumeId,
       handler: suggestionNoteForm.handler,
       note: suggestionNoteForm.note,
-      updatePackingList: true
+      updatePackingList: previewUpdatePackingList
     });
     dispatch('suggestion-applied', { suggestionId: selectedSuggestion.suggestionId, result });
+    closePreviewModal();
     closeSuggestionDetail();
+  }
+
+  function closePreviewModal() {
+    showPreviewModal = false;
+    currentPreview = null;
+    previewLoading = false;
   }
 
   function handleConfirmSuggestion() {
@@ -233,7 +267,8 @@
 
   function handleKeydown(e) {
     if (e.key === 'Escape') {
-      if (showDetailModal) closeDetail();
+      if (showPreviewModal) closePreviewModal();
+      else if (showDetailModal) closeDetail();
     }
   }
 </script>
@@ -975,6 +1010,211 @@
 
         <div class="rc-modal-actions">
           <button type="button" on:click={closeSuggestionDetail}>关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if showPreviewModal && currentPreview}
+  <div class="rc-modal-overlay" role="presentation" on:click={closePreviewModal}>
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="rc-modal rc-modal-wide rc-modal-xl" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown={handleKeydown} tabindex="-1">
+      <div class="rc-modal-header">
+        <h2><Eye size={16} />执行前预演 · 调配影响预览</h2>
+        <button type="button" class="rc-icon-btn" on:click={closePreviewModal} aria-label="关闭"><X size={20} /></button>
+      </div>
+      <div class="rc-modal-body">
+        <div class="rc-preview-summary">
+          <div class="rc-preview-summary-item">
+            <span class="rc-preview-summary-label">排期</span>
+            <strong>{currentPreview.schedule?.play || '-'} · {currentPreview.schedule?.date || '-'}</strong>
+          </div>
+          <div class="rc-preview-summary-item">
+            <span class="rc-preview-summary-label">建议</span>
+            <strong>{currentPreview.suggestion?.description || '-'}</strong>
+          </div>
+        </div>
+
+        {#if currentPreview.scheduleChanges}
+          <div class="rc-detail-section">
+            <h3><Shirt size={14} />排期服装变更</h3>
+            <div class="rc-preview-change">
+              <div class="rc-preview-change-col">
+                <div class="rc-preview-change-label rc-preview-change-old"><XCircle size={12} />移除</div>
+                <div class="rc-preview-change-box rc-preview-change-box-old">
+                  <strong>{currentPreview.scheduleChanges.oldCostumeName}</strong>
+                  {#if currentPreview.scheduleChanges.oldCostumeId}
+                    <span class="rc-preview-change-sub">ID: {currentPreview.scheduleChanges.oldCostumeId.slice(0, 8)}...</span>
+                  {/if}
+                </div>
+              </div>
+              <div class="rc-preview-change-arrow">
+                <ArrowRight size={20} />
+              </div>
+              <div class="rc-preview-change-col">
+                <div class="rc-preview-change-label rc-preview-change-new"><CheckCircle size={12} />替换为</div>
+                <div class="rc-preview-change-box rc-preview-change-box-new">
+                  <strong>{currentPreview.scheduleChanges.newCostumeName}</strong>
+                  {#if currentPreview.scheduleChanges.newCostumeId}
+                    <span class="rc-preview-change-sub">ID: {currentPreview.scheduleChanges.newCostumeId.slice(0, 8)}...</span>
+                  {/if}
+                </div>
+              </div>
+            </div>
+          </div>
+        {/if}
+
+        <div class="rc-detail-section">
+          <h3><Package size={14} />装箱单条目更新</h3>
+          <label class="rc-checkbox-label rc-preview-checkbox">
+            <input type="checkbox" bind:checked={previewUpdatePackingList} on:change={handlePreviewTogglePacking} />
+            <span>同步更新装箱单（{currentPreview.packingListChanges?.length || 0} 个装箱单将被修改）</span>
+          </label>
+          {#if previewUpdatePackingList && currentPreview.packingListChanges?.length > 0}
+            <div class="rc-preview-packing-list">
+              {#each currentPreview.packingListChanges as pc (pc.packingListId)}
+                <div class="rc-preview-packing-card">
+                  <div class="rc-preview-packing-title">
+                    <Package size={12} />
+                    <strong>{pc.packingListName}</strong>
+                  </div>
+                  <div class="rc-preview-packing-change">
+                    <div class="rc-preview-packing-item rc-preview-packing-item-old">
+                      <span class="rc-preview-packing-item-label">原条目</span>
+                      <div>
+                        <strong>{pc.oldItem.costumeName}</strong>
+                        {#if pc.oldItem.size}<span class="rc-preview-packing-sub">尺码 {pc.oldItem.size}</span>{/if}
+                        {#if pc.oldItem.location}<span class="rc-preview-packing-sub">位置 {pc.oldItem.location}</span>{/if}
+                      </div>
+                    </div>
+                    <div class="rc-preview-change-arrow"><ArrowRight size={16} /></div>
+                    <div class="rc-preview-packing-item rc-preview-packing-item-new">
+                      <span class="rc-preview-packing-item-label">新条目</span>
+                      <div>
+                        <strong>{pc.newItem.costumeName}</strong>
+                        {#if pc.newItem.size}<span class="rc-preview-packing-sub">尺码 {pc.newItem.size}</span>{/if}
+                        {#if pc.newItem.location}<span class="rc-preview-packing-sub">位置 {pc.newItem.location}</span>{/if}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {:else if !previewUpdatePackingList}
+            <p class="rc-hint">已选择不同步装箱单，装箱单条目将保持不变。</p>
+          {:else}
+            <p class="rc-hint">当前排期暂无关联装箱单。</p>
+          {/if}
+        </div>
+
+        {#if currentPreview.riskImpacts && currentPreview.riskImpacts.length > 0}
+          <div class="rc-detail-section">
+            <h3><AlertTriangle size={14} />相关风险状态变化</h3>
+            <div class="rc-preview-risk-list">
+              {#each currentPreview.riskImpacts as ri (ri.riskKey)}
+                <div class="rc-preview-risk-item" class:rc-preview-risk-resolve={ri.impact === 'resolve'} class:rc-preview-risk-introduce={ri.impact === 'introduce'}>
+                  <div class="rc-preview-risk-icon">
+                    {#if ri.impact === 'resolve'}
+                      <CheckCircle2 size={14} />
+                    {:else}
+                      <AlertCircle size={14} />
+                    {/if}
+                  </div>
+                  <div class="rc-preview-risk-main">
+                    <div class="rc-preview-risk-header">
+                      <span class="rc-risk-level rc-risk-{ri.riskLevel}">{getRiskLevelLabel(ri.riskLevel)}</span>
+                      <strong>{RISK_TYPE_LABELS[ri.riskType] || ri.riskType}</strong>
+                      <span class="rc-preview-risk-badge rc-preview-risk-badge-{ri.impact}">
+                        {ri.impact === 'resolve' ? '将解决' : '需关注'}
+                      </span>
+                    </div>
+                    <p class="rc-preview-risk-message">{ri.riskMessage}</p>
+                    <div class="rc-preview-risk-meta">
+                      <span><Shirt size={10} />{ri.costumeName}</span>
+                      <span>{ri.impactDescription}</span>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        {#if currentPreview.affectedWorkOrders && currentPreview.affectedWorkOrders.length > 0}
+          <div class="rc-detail-section">
+            <h3><Wrench size={14} />可能受影响的工单（{currentPreview.affectedWorkOrders.length}）</h3>
+            <div class="rc-preview-affected-list">
+              {#each currentPreview.affectedWorkOrders as wo (wo.workOrderId)}
+                <div class="rc-preview-affected-item" class:rc-preview-affected-blocker={wo.impact === 'blocker'}>
+                  <div class="rc-preview-affected-icon">
+                    <Wrench size={14} />
+                  </div>
+                  <div class="rc-preview-affected-main">
+                    <div class="rc-preview-affected-header">
+                      <strong>{wo.workOrderType}</strong>
+                      <span class="rc-preview-affected-status">{wo.workOrderStatus}</span>
+                      {#if wo.impact === 'blocker'}
+                        <span class="rc-preview-affected-tag rc-preview-affected-tag-warn">可能阻碍</span>
+                      {:else}
+                        <span class="rc-preview-affected-tag">需确认</span>
+                      {/if}
+                    </div>
+                    <div class="rc-preview-affected-meta">
+                      <span><Shirt size={10} />{wo.costumeName}</span>
+                      {#if wo.assignee && wo.assignee !== '-'}<span><User size={10} />{wo.assignee}</span>{/if}
+                      {#if wo.dueDate && wo.dueDate !== '-'}<span><Clock size={10} />截止 {wo.dueDate}</span>{/if}
+                    </div>
+                    <p class="rc-preview-affected-desc">{wo.impactDescription}</p>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        {#if currentPreview.affectedReservations && currentPreview.affectedReservations.length > 0}
+          <div class="rc-detail-section">
+            <h3><CalendarDays size={14} />可能受影响的预约（{currentPreview.affectedReservations.length}）</h3>
+            <div class="rc-preview-affected-list">
+              {#each currentPreview.affectedReservations as rv (rv.reservationId)}
+                <div class="rc-preview-affected-item" class:rc-preview-affected-blocker={rv.impact === 'conflict'}>
+                  <div class="rc-preview-affected-icon">
+                    <CalendarDays size={14} />
+                  </div>
+                  <div class="rc-preview-affected-main">
+                    <div class="rc-preview-affected-header">
+                      <strong>{rv.reservationType}预约</strong>
+                      <span class="rc-preview-affected-status">{rv.reservationStatus || '未标记'}</span>
+                      {#if rv.impact === 'conflict'}
+                        <span class="rc-preview-affected-tag rc-preview-affected-tag-danger">可能冲突</span>
+                      {:else}
+                        <span class="rc-preview-affected-tag">需确认</span>
+                      {/if}
+                    </div>
+                    <div class="rc-preview-affected-meta">
+                      <span><Shirt size={10} />{rv.costumeName}</span>
+                      {#if rv.reservedFor && rv.reservedFor !== '-'}<span><User size={10} />{rv.reservedFor}</span>{/if}
+                      {#if rv.date && rv.date !== '-'}<span><Clock size={10} />{rv.date}</span>{/if}
+                    </div>
+                    <p class="rc-preview-affected-desc">{rv.impactDescription}</p>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <div class="rc-preview-note">
+          <ClipboardList size={14} />
+          <span>确认执行后，系统将沿用现有事件记录机制记录操作，并自动刷新相关风险与调配建议。</span>
+        </div>
+
+        <div class="rc-modal-actions rc-modal-actions-right">
+          <button type="button" class="rc-btn-secondary" on:click={closePreviewModal}>取消</button>
+          <button type="button" class="rc-btn-primary" on:click={handlePreviewConfirm}>
+            <ThumbsUp size={14} />确认执行
+          </button>
         </div>
       </div>
     </div>
@@ -1931,5 +2171,396 @@
     .rc-quick-actions { grid-template-columns: 1fr; }
     .rc-suggest-header { flex-direction: column; }
     .rc-alt-detail-item { flex-direction: column; }
+  }
+
+  .rc-modal-xl { max-width: 820px; }
+
+  .rc-preview-summary {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    background: #faf6f1;
+    border: 1px solid #eadfd4;
+    border-radius: 8px;
+  }
+
+  .rc-preview-summary-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .rc-preview-summary-label {
+    font-size: 11px;
+    color: #8a7665;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .rc-preview-change {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .rc-preview-change-col {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .rc-preview-change-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .rc-preview-change-old { color: #8a2d2d; }
+  .rc-preview-change-new { color: #2d5a2d; }
+
+  .rc-preview-change-box {
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid #eadfd4;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .rc-preview-change-box-old {
+    background: #fff5f5;
+    border-color: #e8c8c8;
+  }
+
+  .rc-preview-change-box-new {
+    background: #f0fbf0;
+    border-color: #b8d8b8;
+  }
+
+  .rc-preview-change-sub {
+    font-size: 11px;
+    color: #8a7665;
+    font-family: monospace;
+  }
+
+  .rc-preview-change-arrow {
+    color: #8a7665;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .rc-preview-checkbox {
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    background: #faf6f1;
+    border-radius: 6px;
+  }
+
+  .rc-preview-packing-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .rc-preview-packing-card {
+    padding: 12px;
+    border: 1px solid #eadfd4;
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  .rc-preview-packing-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #26211c;
+    margin-bottom: 10px;
+  }
+
+  .rc-preview-packing-change {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 10px;
+    align-items: stretch;
+  }
+
+  .rc-preview-packing-item {
+    padding: 10px;
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .rc-preview-packing-item-old {
+    background: #fff5f5;
+    border: 1px solid #e8c8c8;
+  }
+
+  .rc-preview-packing-item-new {
+    background: #f0fbf0;
+    border: 1px solid #b8d8b8;
+  }
+
+  .rc-preview-packing-item-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: #8a7665;
+  }
+
+  .rc-preview-packing-sub {
+    font-size: 11px;
+    color: #6b5a4d;
+    margin-left: 6px;
+  }
+
+  .rc-preview-risk-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .rc-preview-risk-item {
+    display: flex;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid #eadfd4;
+    background: #fff;
+  }
+
+  .rc-preview-risk-resolve {
+    background: #f0fbf0;
+    border-color: #b8d8b8;
+  }
+
+  .rc-preview-risk-introduce {
+    background: #fffbf0;
+    border-color: #e8d8a8;
+  }
+
+  .rc-preview-risk-icon {
+    flex-shrink: 0;
+    padding-top: 2px;
+  }
+
+  .rc-preview-risk-resolve .rc-preview-risk-icon { color: #2d5a2d; }
+  .rc-preview-risk-introduce .rc-preview-risk-icon { color: #8a5a1a; }
+
+  .rc-preview-risk-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .rc-preview-risk-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .rc-preview-risk-badge {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+
+  .rc-preview-risk-badge-resolve {
+    background: #e6f0e6;
+    color: #2d5a2d;
+  }
+
+  .rc-preview-risk-badge-introduce {
+    background: #fff4e6;
+    color: #8a5a1a;
+  }
+
+  .rc-preview-risk-message {
+    font-size: 13px;
+    color: #26211c;
+    margin: 0;
+  }
+
+  .rc-preview-risk-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: #6b5a4d;
+  }
+
+  .rc-preview-risk-meta span {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .rc-preview-affected-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .rc-preview-affected-item {
+    display: flex;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid #eadfd4;
+    background: #fff;
+  }
+
+  .rc-preview-affected-blocker {
+    background: #fff8f5;
+    border-color: #e8c8b8;
+  }
+
+  .rc-preview-affected-icon {
+    flex-shrink: 0;
+    padding-top: 2px;
+    color: #6b5a4d;
+  }
+
+  .rc-preview-affected-blocker .rc-preview-affected-icon { color: #8a4a2d; }
+
+  .rc-preview-affected-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .rc-preview-affected-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .rc-preview-affected-status {
+    font-size: 11px;
+    color: #6b5a4d;
+    background: #f0e6dc;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .rc-preview-affected-tag {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: #e6eef6;
+    color: #1a4a8a;
+  }
+
+  .rc-preview-affected-tag-warn {
+    background: #fff4e6;
+    color: #8a5a1a;
+  }
+
+  .rc-preview-affected-tag-danger {
+    background: #fdecea;
+    color: #8a2d2d;
+  }
+
+  .rc-preview-affected-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: #6b5a4d;
+  }
+
+  .rc-preview-affected-meta span {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .rc-preview-affected-desc {
+    font-size: 12px;
+    color: #6b5a4d;
+    margin: 0;
+  }
+
+  .rc-preview-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 14px;
+    background: #f0f6fb;
+    border: 1px solid #c8d8e8;
+    border-radius: 8px;
+    font-size: 12px;
+    color: #1a4a8a;
+    margin-top: 4px;
+  }
+
+  .rc-hint {
+    font-size: 12px;
+    color: #8a7665;
+    margin: 0;
+    padding: 8px 0;
+  }
+
+  .rc-modal-actions-right {
+    justify-content: flex-end;
+  }
+
+  .rc-btn-primary {
+    background: #2d5a2d;
+    color: #fff;
+    border: 1px solid #2d5a2d;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .rc-btn-primary:hover {
+    background: #234a23;
+  }
+
+  .rc-btn-secondary {
+    background: #fff;
+    color: #26211c;
+    border: 1px solid #d4c8b8;
+    padding: 8px 16px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .rc-btn-secondary:hover {
+    background: #faf6f1;
+  }
+
+  @media (max-width: 768px) {
+    .rc-preview-change,
+    .rc-preview-packing-change { grid-template-columns: 1fr; }
+    .rc-preview-change-arrow { transform: rotate(90deg); }
+    .rc-preview-summary { grid-template-columns: 1fr; }
   }
 </style>

@@ -5157,6 +5157,222 @@ class DataIndex {
     };
   }
 
+  previewScheduleSuggestion(suggestionId, {
+    applyAlternative = null,
+    updatePackingList = true
+  } = {}) {
+    const allSuggs = this.computeAllSuggestions();
+    const suggestion = allSuggs.find(s => s.id === suggestionId || s.suggestionId === suggestionId);
+    if (!suggestion) return { ok: false, error: '建议不存在' };
+    const schedule = this.getScheduleById(suggestion.scheduleId);
+    if (!schedule) return { ok: false, error: '排期不存在' };
+
+    const preview = {
+      ok: true,
+      suggestion,
+      schedule,
+      scheduleChanges: null,
+      packingListChanges: [],
+      riskImpacts: [],
+      affectedWorkOrders: [],
+      affectedReservations: []
+    };
+
+    let appliedAltName = null;
+    let appliedAltId = null;
+    let oldCostumeId = suggestion.costumeId;
+    let newCostumeId = null;
+
+    if (applyAlternative) {
+      const alt = suggestion.alternatives.find(a => a.costumeId === applyAlternative || (a.costume && a.costume.id === applyAlternative));
+      if (!alt) return { ok: false, error: '替代服装不存在' };
+      oldCostumeId = suggestion.costumeId;
+      newCostumeId = alt.costumeId || (alt.costume && alt.costume.id);
+      appliedAltName = alt.name || (alt.costume && alt.costume.name);
+      appliedAltId = newCostumeId;
+
+      if (oldCostumeId && newCostumeId && schedule.linkedCostumeIds?.includes(oldCostumeId)) {
+        const newLinked = [...schedule.linkedCostumeIds];
+        const idx = newLinked.indexOf(oldCostumeId);
+        if (idx !== -1) {
+          newLinked[idx] = newCostumeId;
+        } else {
+          newLinked.push(newCostumeId);
+        }
+        const oldCostume = this.getCostumeById(oldCostumeId);
+        const newCostume = this.getCostumeById(newCostumeId);
+        preview.scheduleChanges = {
+          type: 'swap_costume',
+          scheduleId: schedule.id,
+          scheduleName: `${schedule.play} · ${schedule.date}`,
+          oldCostumeId,
+          newCostumeId,
+          oldCostumeName: oldCostume?.name || suggestion.costumeName || oldCostumeId,
+          newCostumeName: appliedAltName || newCostume?.name || newCostumeId,
+          oldLinked: [...schedule.linkedCostumeIds],
+          newLinked
+        };
+      }
+
+      if (updatePackingList) {
+        const packingLists = this.getPackingListsForSchedule(schedule.id);
+        for (const pl of packingLists) {
+          const items = pl.items || [];
+          const targetItem = items.find(i => i.costumeId === oldCostumeId);
+          if (targetItem) {
+            const newItem = {
+              ...targetItem,
+              costumeId: newCostumeId,
+              costumeName: appliedAltName || newCostumeId,
+              size: alt.size || (alt.costume && alt.costume.size) || targetItem.size,
+              location: alt.location || (alt.costume && alt.costume.location) || targetItem.location,
+              note: `由调配建议替换：原「${suggestion.costumeName}」→「${appliedAltName || newCostumeId}」${targetItem.note ? ' | ' + targetItem.note : ''}`,
+              source: '调配建议替换',
+              replacedFrom: suggestion.costumeName
+            };
+            const plItems = items.map(i => i.costumeId === oldCostumeId ? newItem : i);
+            preview.packingListChanges.push({
+              packingListId: pl.id,
+              packingListName: pl.name || `${pl.play} ${pl.performanceDate} 装箱单`,
+              oldItem: targetItem,
+              newItem
+            });
+          }
+        }
+      }
+    }
+
+    this.computeAllRisks();
+    if (oldCostumeId) {
+      const oldRisks = this._riskCache.byCostumeId.get(oldCostumeId) || [];
+      for (const r of oldRisks) {
+        if (r.scheduleId === schedule.id || r.costumeId === oldCostumeId) {
+          preview.riskImpacts.push({
+            costumeId: oldCostumeId,
+            costumeName: suggestion.costumeName || oldCostumeId,
+            riskKey: r.riskKey,
+            riskType: r.type,
+            riskLevel: r.level,
+            riskMessage: r.message,
+            currentStatus: r.processingStatus || RISK_STATUS.PENDING,
+            impact: 'resolve',
+            impactDescription: '调配执行后此风险预计将被解决'
+          });
+        }
+      }
+    }
+    if (newCostumeId && newCostumeId !== oldCostumeId) {
+      const newCostumeRisks = this._riskCache.byCostumeId.get(newCostumeId) || [];
+      for (const r of newCostumeRisks) {
+        if (r.scheduleId === schedule.id || r.costumeId === newCostumeId) {
+          preview.riskImpacts.push({
+            costumeId: newCostumeId,
+            costumeName: appliedAltName || newCostumeId,
+            riskKey: r.riskKey,
+            riskType: r.type,
+            riskLevel: r.level,
+            riskMessage: r.message,
+            currentStatus: r.processingStatus || RISK_STATUS.PENDING,
+            impact: 'introduce',
+            impactDescription: '新替换服装存在相关风险，需关注'
+          });
+        }
+      }
+      const newRisksForSchedule = this._riskCache.byScheduleId.get(schedule.id);
+      if (newRisksForSchedule) {
+        for (const r of newRisksForSchedule.risks || []) {
+          if (r.costumeId === newCostumeId && !preview.riskImpacts.find(i => i.riskKey === r.riskKey)) {
+            preview.riskImpacts.push({
+              costumeId: newCostumeId,
+              costumeName: appliedAltName || newCostumeId,
+              riskKey: r.riskKey,
+              riskType: r.type,
+              riskLevel: r.level,
+              riskMessage: r.message,
+              currentStatus: r.processingStatus || RISK_STATUS.PENDING,
+              impact: 'introduce',
+              impactDescription: '新替换服装在当前排期存在风险'
+            });
+          }
+        }
+      }
+    }
+
+    if (oldCostumeId) {
+      const oldWOs = this.getActiveWorkOrdersByCostumeId(oldCostumeId);
+      for (const wo of oldWOs) {
+        preview.affectedWorkOrders.push({
+          workOrderId: wo.id,
+          workOrderType: wo.type,
+          workOrderStatus: wo.status,
+          costumeId: oldCostumeId,
+          costumeName: suggestion.costumeName || oldCostumeId,
+          assignee: wo.assignee || '-',
+          dueDate: wo.dueDate || '-',
+          impact: 'review',
+          impactDescription: '原服装关联的工单，调配后需确认是否继续处理'
+        });
+      }
+    }
+    if (newCostumeId && newCostumeId !== oldCostumeId) {
+      const newWOs = this.getActiveWorkOrdersByCostumeId(newCostumeId);
+      for (const wo of newWOs) {
+        if (!preview.affectedWorkOrders.find(w => w.workOrderId === wo.id)) {
+          preview.affectedWorkOrders.push({
+            workOrderId: wo.id,
+            workOrderType: wo.type,
+            workOrderStatus: wo.status,
+            costumeId: newCostumeId,
+            costumeName: appliedAltName || newCostumeId,
+            assignee: wo.assignee || '-',
+            dueDate: wo.dueDate || '-',
+            impact: 'blocker',
+            impactDescription: '新替换服装存在未完成工单，可能影响使用'
+          });
+        }
+      }
+    }
+
+    if (oldCostumeId) {
+      const oldRes = this.getReservationsForCostume(oldCostumeId);
+      for (const r of oldRes) {
+        if (!r.deletedAt) {
+          preview.affectedReservations.push({
+            reservationId: r.id,
+            reservationType: r.type,
+            reservationStatus: r.status,
+            costumeId: oldCostumeId,
+            costumeName: suggestion.costumeName || oldCostumeId,
+            reservedFor: r.reservedFor || '-',
+            date: r.date || '-',
+            impact: 'review',
+            impactDescription: '原服装的预约记录，调配后需确认是否调整'
+          });
+        }
+      }
+    }
+    if (newCostumeId && newCostumeId !== oldCostumeId) {
+      const newRes = this.getReservationsForCostume(newCostumeId);
+      for (const r of newRes) {
+        if (!r.deletedAt && !preview.affectedReservations.find(rv => rv.reservationId === r.id)) {
+          preview.affectedReservations.push({
+            reservationId: r.id,
+            reservationType: r.type,
+            reservationStatus: r.status,
+            costumeId: newCostumeId,
+            costumeName: appliedAltName || newCostumeId,
+            reservedFor: r.reservedFor || '-',
+            date: r.date || '-',
+            impact: 'conflict',
+            impactDescription: '新替换服装已有预约，需确认是否冲突'
+          });
+        }
+      }
+    }
+
+    return preview;
+  }
+
   confirmSuggestionOnly(suggestionId, { handler = '', note = '' } = {}) {
     const allSuggs = this.computeAllSuggestions();
     const suggestion = allSuggs.find(s => s.id === suggestionId || s.suggestionId === suggestionId);

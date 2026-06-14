@@ -286,6 +286,13 @@ export function getSuggestionStats() {
   return globalIndex.getSuggestionStats();
 }
 
+export function previewScheduleSuggestion(suggestionId, options) {
+  return globalIndex.previewScheduleSuggestion(suggestionId, {
+    applyAlternative: options?.applyAlternative || null,
+    updatePackingList: options?.updatePackingList !== false
+  });
+}
+
 export function applyScheduleSuggestion(suggestionId, options) {
   return executeSuggestionFull(suggestionId, {
     alternativeCostumeId: options?.applyAlternative || null,

@@ -4,7 +4,8 @@
     CalendarDays, Plus, Search, X, Save, Trash2, Eye,
     AlertTriangle, AlertOctagon, Clock, Shirt, CheckCircle,
     Link2, ChevronDown, ChevronUp, Wrench, Droplets, Package, User,
-    ArrowRightLeft, Zap, ThumbsUp, SkipForward, Edit3, MessageSquare, CheckCircle2, PauseCircle
+    ArrowRightLeft, Zap, ThumbsUp, SkipForward, Edit3, MessageSquare, CheckCircle2, PauseCircle,
+    ArrowRight, ClipboardList, AlertCircle, XCircle
   } from 'lucide-svelte';
   import {
     addSchedule,
@@ -22,6 +23,7 @@
     getRiskStats,
     getSuggestionsByScheduleId,
     applyScheduleSuggestion,
+    previewScheduleSuggestion,
     confirmSuggestionOnly,
     deferSuggestion,
     SUGGESTION_STATUS,
@@ -370,6 +372,11 @@
   let kanbanSuggestionForm = { handler: '', note: '' };
   let kanbanSelectedAltMap = new Map();
 
+  let skShowPreviewModal = false;
+  let skCurrentPreview = null;
+  let skPreviewUpdatePackingList = true;
+  let skPreviewSuggestionId = null;
+
   function getKanbanSelectedAlt(suggestionId, alternatives) {
     if (kanbanSelectedAltMap.has(suggestionId)) return kanbanSelectedAltMap.get(suggestionId);
     return alternatives && alternatives.length > 0 ? alternatives[0].costumeId : null;
@@ -382,13 +389,44 @@
 
   function handleKanbanApplySuggestion(sug) {
     const altId = getKanbanSelectedAlt(sug.suggestionId, sug.alternatives);
-    const result = applyScheduleSuggestion(sug.suggestionId, {
+    skPreviewSuggestionId = sug.suggestionId;
+    skPreviewUpdatePackingList = true;
+    skCurrentPreview = previewScheduleSuggestion(sug.suggestionId, {
+      applyAlternative: altId,
+      updatePackingList: true
+    });
+    skShowPreviewModal = true;
+  }
+
+  function handleSkPreviewTogglePacking(ev) {
+    if (!skPreviewSuggestionId) return;
+    const sug = detailScheduleSuggestions.find(s => s.suggestionId === skPreviewSuggestionId);
+    const altId = sug ? getKanbanSelectedAlt(sug.suggestionId, sug.alternatives) : null;
+    skPreviewUpdatePackingList = ev.target.checked;
+    skCurrentPreview = previewScheduleSuggestion(skPreviewSuggestionId, {
+      applyAlternative: altId,
+      updatePackingList: skPreviewUpdatePackingList
+    });
+  }
+
+  function handleSkPreviewConfirm() {
+    if (!skPreviewSuggestionId) return;
+    const sug = detailScheduleSuggestions.find(s => s.suggestionId === skPreviewSuggestionId);
+    const altId = sug ? getKanbanSelectedAlt(sug.suggestionId, sug.alternatives) : null;
+    const result = applyScheduleSuggestion(skPreviewSuggestionId, {
       applyAlternative: altId,
       handler: kanbanSuggestionForm.handler,
       note: kanbanSuggestionForm.note,
-      updatePackingList: true
+      updatePackingList: skPreviewUpdatePackingList
     });
-    dispatch('suggestion-applied', { suggestionId: sug.suggestionId, result });
+    dispatch('suggestion-applied', { suggestionId: skPreviewSuggestionId, result });
+    closeSkPreviewModal();
+  }
+
+  function closeSkPreviewModal() {
+    skShowPreviewModal = false;
+    skCurrentPreview = null;
+    skPreviewSuggestionId = null;
   }
 
   function handleKanbanConfirmSuggestion(sug) {
@@ -446,7 +484,8 @@
 
   function handleKeydown(e) {
     if (e.key === 'Escape') {
-      if (showRiskDetail) closeRiskSummary();
+      if (skShowPreviewModal) closeSkPreviewModal();
+      else if (showRiskDetail) closeRiskSummary();
       else if (showDetailModal) closeDetail();
       else if (showAddModal) closeAddModal();
     }
@@ -1253,6 +1292,211 @@
 
         <div class="sk-modal-actions">
           <button type="button" on:click={closeRiskSummary}>关闭</button>
+        </div>
+      </div>
+    </div>
+  </div>
+{/if}
+
+{#if skShowPreviewModal && skCurrentPreview}
+  <div class="sk-modal-overlay" role="presentation" on:click={closeSkPreviewModal}>
+    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
+    <div class="sk-modal sk-modal-wide sk-modal-xl" role="dialog" aria-modal="true" on:click|stopPropagation on:keydown={handleKeydown} tabindex="-1">
+      <div class="sk-modal-header">
+        <h2><Eye size={16} />执行前预演 · 调配影响预览</h2>
+        <button type="button" class="sk-icon-btn" on:click={closeSkPreviewModal} aria-label="关闭"><X size={20} /></button>
+      </div>
+      <div class="sk-detail-body">
+        <div class="sk-preview-summary">
+          <div class="sk-preview-summary-item">
+            <span class="sk-preview-summary-label">排期</span>
+            <strong>{skCurrentPreview.schedule?.play || '-'} · {skCurrentPreview.schedule?.date || '-'}</strong>
+          </div>
+          <div class="sk-preview-summary-item">
+            <span class="sk-preview-summary-label">建议</span>
+            <strong>{skCurrentPreview.suggestion?.description || '-'}</strong>
+          </div>
+        </div>
+
+        {#if skCurrentPreview.scheduleChanges}
+          <div class="sk-detail-section">
+            <h3><Shirt size={14} />排期服装变更</h3>
+            <div class="sk-preview-change">
+              <div class="sk-preview-change-col">
+                <div class="sk-preview-change-label sk-preview-change-old"><XCircle size={12} />移除</div>
+                <div class="sk-preview-change-box sk-preview-change-box-old">
+                  <strong>{skCurrentPreview.scheduleChanges.oldCostumeName}</strong>
+                  {#if skCurrentPreview.scheduleChanges.oldCostumeId}
+                    <span class="sk-preview-change-sub">ID: {skCurrentPreview.scheduleChanges.oldCostumeId.slice(0, 8)}...</span>
+                  {/if}
+                </div>
+              </div>
+              <div class="sk-preview-change-arrow">
+                <ArrowRight size={20} />
+              </div>
+              <div class="sk-preview-change-col">
+                <div class="sk-preview-change-label sk-preview-change-new"><CheckCircle size={12} />替换为</div>
+                <div class="sk-preview-change-box sk-preview-change-box-new">
+                  <strong>{skCurrentPreview.scheduleChanges.newCostumeName}</strong>
+                  {#if skCurrentPreview.scheduleChanges.newCostumeId}
+                    <span class="sk-preview-change-sub">ID: {skCurrentPreview.scheduleChanges.newCostumeId.slice(0, 8)}...</span>
+                  {/if}
+                </div>
+              </div>
+            </div>
+          </div>
+        {/if}
+
+        <div class="sk-detail-section">
+          <h3><Package size={14} />装箱单条目更新</h3>
+          <label class="sk-checkbox-label sk-preview-checkbox">
+            <input type="checkbox" bind:checked={skPreviewUpdatePackingList} on:change={handleSkPreviewTogglePacking} />
+            <span>同步更新装箱单（{skCurrentPreview.packingListChanges?.length || 0} 个装箱单将被修改）</span>
+          </label>
+          {#if skPreviewUpdatePackingList && skCurrentPreview.packingListChanges?.length > 0}
+            <div class="sk-preview-packing-list">
+              {#each skCurrentPreview.packingListChanges as pc (pc.packingListId)}
+                <div class="sk-preview-packing-card">
+                  <div class="sk-preview-packing-title">
+                    <Package size={12} />
+                    <strong>{pc.packingListName}</strong>
+                  </div>
+                  <div class="sk-preview-packing-change">
+                    <div class="sk-preview-packing-item sk-preview-packing-item-old">
+                      <span class="sk-preview-packing-item-label">原条目</span>
+                      <div>
+                        <strong>{pc.oldItem.costumeName}</strong>
+                        {#if pc.oldItem.size}<span class="sk-preview-packing-sub">尺码 {pc.oldItem.size}</span>{/if}
+                        {#if pc.oldItem.location}<span class="sk-preview-packing-sub">位置 {pc.oldItem.location}</span>{/if}
+                      </div>
+                    </div>
+                    <div class="sk-preview-change-arrow"><ArrowRight size={16} /></div>
+                    <div class="sk-preview-packing-item sk-preview-packing-item-new">
+                      <span class="sk-preview-packing-item-label">新条目</span>
+                      <div>
+                        <strong>{pc.newItem.costumeName}</strong>
+                        {#if pc.newItem.size}<span class="sk-preview-packing-sub">尺码 {pc.newItem.size}</span>{/if}
+                        {#if pc.newItem.location}<span class="sk-preview-packing-sub">位置 {pc.newItem.location}</span>{/if}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          {:else if !skPreviewUpdatePackingList}
+            <p class="sk-hint">已选择不同步装箱单，装箱单条目将保持不变。</p>
+          {:else}
+            <p class="sk-hint">当前排期暂无关联装箱单。</p>
+          {/if}
+        </div>
+
+        {#if skCurrentPreview.riskImpacts && skCurrentPreview.riskImpacts.length > 0}
+          <div class="sk-detail-section">
+            <h3><AlertTriangle size={14} />相关风险状态变化</h3>
+            <div class="sk-preview-risk-list">
+              {#each skCurrentPreview.riskImpacts as ri (ri.riskKey)}
+                <div class="sk-preview-risk-item" class:sk-preview-risk-resolve={ri.impact === 'resolve'} class:sk-preview-risk-introduce={ri.impact === 'introduce'}>
+                  <div class="sk-preview-risk-icon">
+                    {#if ri.impact === 'resolve'}
+                      <CheckCircle2 size={14} />
+                    {:else}
+                      <AlertCircle size={14} />
+                    {/if}
+                  </div>
+                  <div class="sk-preview-risk-main">
+                    <div class="sk-preview-risk-header">
+                      <span class="sk-suggest-level sk-suggest-level-{ri.riskLevel}">{getScheduleRiskLevelLabel(ri.riskLevel)}</span>
+                      <strong>{RISK_TYPE_LABELS[ri.riskType] || ri.riskType}</strong>
+                      <span class="sk-preview-risk-badge sk-preview-risk-badge-{ri.impact}">
+                        {ri.impact === 'resolve' ? '将解决' : '需关注'}
+                      </span>
+                    </div>
+                    <p class="sk-preview-risk-message">{ri.riskMessage}</p>
+                    <div class="sk-preview-risk-meta">
+                      <span><Shirt size={10} />{ri.costumeName}</span>
+                      <span>{ri.impactDescription}</span>
+                    </div>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        {#if skCurrentPreview.affectedWorkOrders && skCurrentPreview.affectedWorkOrders.length > 0}
+          <div class="sk-detail-section">
+            <h3><Wrench size={14} />可能受影响的工单（{skCurrentPreview.affectedWorkOrders.length}）</h3>
+            <div class="sk-preview-affected-list">
+              {#each skCurrentPreview.affectedWorkOrders as wo (wo.workOrderId)}
+                <div class="sk-preview-affected-item" class:sk-preview-affected-blocker={wo.impact === 'blocker'}>
+                  <div class="sk-preview-affected-icon">
+                    <Wrench size={14} />
+                  </div>
+                  <div class="sk-preview-affected-main">
+                    <div class="sk-preview-affected-header">
+                      <strong>{wo.workOrderType}</strong>
+                      <span class="sk-preview-affected-status">{wo.workOrderStatus}</span>
+                      {#if wo.impact === 'blocker'}
+                        <span class="sk-preview-affected-tag sk-preview-affected-tag-warn">可能阻碍</span>
+                      {:else}
+                        <span class="sk-preview-affected-tag">需确认</span>
+                      {/if}
+                    </div>
+                    <div class="sk-preview-affected-meta">
+                      <span><Shirt size={10} />{wo.costumeName}</span>
+                      {#if wo.assignee && wo.assignee !== '-'}<span><User size={10} />{wo.assignee}</span>{/if}
+                      {#if wo.dueDate && wo.dueDate !== '-'}<span><Clock size={10} />截止 {wo.dueDate}</span>{/if}
+                    </div>
+                    <p class="sk-preview-affected-desc">{wo.impactDescription}</p>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        {#if skCurrentPreview.affectedReservations && skCurrentPreview.affectedReservations.length > 0}
+          <div class="sk-detail-section">
+            <h3><CalendarDays size={14} />可能受影响的预约（{skCurrentPreview.affectedReservations.length}）</h3>
+            <div class="sk-preview-affected-list">
+              {#each skCurrentPreview.affectedReservations as rv (rv.reservationId)}
+                <div class="sk-preview-affected-item" class:sk-preview-affected-blocker={rv.impact === 'conflict'}>
+                  <div class="sk-preview-affected-icon">
+                    <CalendarDays size={14} />
+                  </div>
+                  <div class="sk-preview-affected-main">
+                    <div class="sk-preview-affected-header">
+                      <strong>{rv.reservationType}预约</strong>
+                      <span class="sk-preview-affected-status">{rv.reservationStatus || '未标记'}</span>
+                      {#if rv.impact === 'conflict'}
+                        <span class="sk-preview-affected-tag sk-preview-affected-tag-danger">可能冲突</span>
+                      {:else}
+                        <span class="sk-preview-affected-tag">需确认</span>
+                      {/if}
+                    </div>
+                    <div class="sk-preview-affected-meta">
+                      <span><Shirt size={10} />{rv.costumeName}</span>
+                      {#if rv.reservedFor && rv.reservedFor !== '-'}<span><User size={10} />{rv.reservedFor}</span>{/if}
+                      {#if rv.date && rv.date !== '-'}<span><Clock size={10} />{rv.date}</span>{/if}
+                    </div>
+                    <p class="sk-preview-affected-desc">{rv.impactDescription}</p>
+                  </div>
+                </div>
+              {/each}
+            </div>
+          </div>
+        {/if}
+
+        <div class="sk-preview-note">
+          <ClipboardList size={14} />
+          <span>确认执行后，系统将沿用现有事件记录机制记录操作，并自动刷新相关风险与调配建议。</span>
+        </div>
+
+        <div class="sk-modal-actions sk-modal-actions-right">
+          <button type="button" class="sk-btn-secondary" on:click={closeSkPreviewModal}>取消</button>
+          <button type="button" class="sk-btn-primary" on:click={handleSkPreviewConfirm}>
+            <ThumbsUp size={14} />确认执行
+          </button>
         </div>
       </div>
     </div>
@@ -2617,5 +2861,353 @@
     .sk-suggest-card-header { flex-direction: column; }
     .sk-suggest-actions { flex-direction: column; }
     .sk-suggest-actions button { width: 100%; justify-content: center; }
+    .sk-preview-change,
+    .sk-preview-packing-change { grid-template-columns: 1fr; }
+    .sk-preview-change-arrow { transform: rotate(90deg); }
+    .sk-preview-summary { grid-template-columns: 1fr; }
+  }
+
+  .sk-modal-xl { max-width: 820px; }
+
+  .sk-preview-summary {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px;
+    margin-bottom: 16px;
+    padding: 12px 16px;
+    background: #faf6f1;
+    border: 1px solid #eadfd4;
+    border-radius: 8px;
+  }
+
+  .sk-preview-summary-item {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .sk-preview-summary-label {
+    font-size: 11px;
+    color: #8a7665;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+
+  .sk-preview-change {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 12px;
+    align-items: center;
+  }
+
+  .sk-preview-change-col {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .sk-preview-change-label {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 12px;
+    font-weight: 500;
+  }
+
+  .sk-preview-change-old { color: #8a2d2d; }
+  .sk-preview-change-new { color: #2d5a2d; }
+
+  .sk-preview-change-box {
+    padding: 12px;
+    border-radius: 8px;
+    border: 1px solid #eadfd4;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .sk-preview-change-box-old {
+    background: #fff5f5;
+    border-color: #e8c8c8;
+  }
+
+  .sk-preview-change-box-new {
+    background: #f0fbf0;
+    border-color: #b8d8b8;
+  }
+
+  .sk-preview-change-sub {
+    font-size: 11px;
+    color: #8a7665;
+    font-family: monospace;
+  }
+
+  .sk-preview-change-arrow {
+    color: #8a7665;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .sk-preview-checkbox {
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    background: #faf6f1;
+    border-radius: 6px;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .sk-preview-packing-list {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .sk-preview-packing-card {
+    padding: 12px;
+    border: 1px solid #eadfd4;
+    border-radius: 8px;
+    background: #fff;
+  }
+
+  .sk-preview-packing-title {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 13px;
+    font-weight: 600;
+    color: #26211c;
+    margin-bottom: 10px;
+  }
+
+  .sk-preview-packing-change {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr;
+    gap: 10px;
+    align-items: stretch;
+  }
+
+  .sk-preview-packing-item {
+    padding: 10px;
+    border-radius: 6px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .sk-preview-packing-item-old {
+    background: #fff5f5;
+    border: 1px solid #e8c8c8;
+  }
+
+  .sk-preview-packing-item-new {
+    background: #f0fbf0;
+    border: 1px solid #b8d8b8;
+  }
+
+  .sk-preview-packing-item-label {
+    font-size: 11px;
+    font-weight: 500;
+    color: #8a7665;
+  }
+
+  .sk-preview-packing-sub {
+    font-size: 11px;
+    color: #6b5a4d;
+    margin-left: 6px;
+  }
+
+  .sk-preview-risk-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .sk-preview-risk-item {
+    display: flex;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid #eadfd4;
+    background: #fff;
+  }
+
+  .sk-preview-risk-resolve {
+    background: #f0fbf0;
+    border-color: #b8d8b8;
+  }
+
+  .sk-preview-risk-introduce {
+    background: #fffbf0;
+    border-color: #e8d8a8;
+  }
+
+  .sk-preview-risk-icon {
+    flex-shrink: 0;
+    padding-top: 2px;
+  }
+
+  .sk-preview-risk-resolve .sk-preview-risk-icon { color: #2d5a2d; }
+  .sk-preview-risk-introduce .sk-preview-risk-icon { color: #8a5a1a; }
+
+  .sk-preview-risk-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .sk-preview-risk-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .sk-preview-risk-badge {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 4px;
+  }
+
+  .sk-preview-risk-badge-resolve {
+    background: #e6f0e6;
+    color: #2d5a2d;
+  }
+
+  .sk-preview-risk-badge-introduce {
+    background: #fff4e6;
+    color: #8a5a1a;
+  }
+
+  .sk-preview-risk-message {
+    font-size: 13px;
+    color: #26211c;
+    margin: 0;
+  }
+
+  .sk-preview-risk-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: #6b5a4d;
+  }
+
+  .sk-preview-risk-meta span {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .sk-preview-affected-list {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .sk-preview-affected-item {
+    display: flex;
+    gap: 10px;
+    padding: 10px 12px;
+    border-radius: 8px;
+    border: 1px solid #eadfd4;
+    background: #fff;
+  }
+
+  .sk-preview-affected-blocker {
+    background: #fff8f5;
+    border-color: #e8c8b8;
+  }
+
+  .sk-preview-affected-icon {
+    flex-shrink: 0;
+    padding-top: 2px;
+    color: #6b5a4d;
+  }
+
+  .sk-preview-affected-blocker .sk-preview-affected-icon { color: #8a4a2d; }
+
+  .sk-preview-affected-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .sk-preview-affected-header {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+  }
+
+  .sk-preview-affected-status {
+    font-size: 11px;
+    color: #6b5a4d;
+    background: #f0e6dc;
+    padding: 2px 6px;
+    border-radius: 4px;
+  }
+
+  .sk-preview-affected-tag {
+    font-size: 11px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: #e6eef6;
+    color: #1a4a8a;
+  }
+
+  .sk-preview-affected-tag-warn {
+    background: #fff4e6;
+    color: #8a5a1a;
+  }
+
+  .sk-preview-affected-tag-danger {
+    background: #fdecea;
+    color: #8a2d2d;
+  }
+
+  .sk-preview-affected-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    font-size: 11px;
+    color: #6b5a4d;
+  }
+
+  .sk-preview-affected-meta span {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .sk-preview-affected-desc {
+    font-size: 12px;
+    color: #6b5a4d;
+    margin: 0;
+  }
+
+  .sk-preview-note {
+    display: flex;
+    align-items: flex-start;
+    gap: 8px;
+    padding: 10px 14px;
+    background: #f0f6fb;
+    border: 1px solid #c8d8e8;
+    border-radius: 8px;
+    font-size: 12px;
+    color: #1a4a8a;
+    margin-top: 4px;
+  }
+
+  .sk-modal-actions-right {
+    justify-content: flex-end;
   }
 </style>
